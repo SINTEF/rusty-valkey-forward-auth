@@ -1,0 +1,113 @@
+[package]
+name = "sensapp"
+version = "0.3.0"
+edition = "2024"
+
+[features]
+default = ["postgres"]
+# Storage backends
+postgres = ["sqlx/postgres"]
+sqlite = ["sqlx/sqlite"]
+timescaledb = ["sqlx/postgres"] # Uses same driver as postgres
+duckdb = ["dep:duckdb"]
+bigquery = [
+  "dep:gcp-bigquery-client",
+  "dep:bigdecimal",
+  "dep:big-decimal-byte-string-encoder",
+  "dep:tonic",
+]
+rrdcached = ["dep:rrdcached-client"]
+clickhouse = ["dep:clickhouse"]
+# Convenience feature to enable all storage backends
+all-storage = [
+  "postgres",
+  "sqlite",
+  "timescaledb",
+  "duckdb",
+  "bigquery",
+  "rrdcached",
+  "clickhouse",
+]
+# Test utilities
+test-utils = []
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+arrow = { version = "57", features = ["ipc"] }
+arrow-ipc = "57"
+arrow-schema = "57"
+arrow-array = "57"
+anyhow = "1.0"
+async-trait = "0.1"
+thiserror = "2.0"
+axum = { version = "0.8", features = ["multipart", "macros"] }
+base64 = "0.22"
+futures = "0.3"
+sqlx = { version = "0.8", features = [
+  "runtime-tokio",
+  "uuid",
+  "json",
+  "time",
+  "rust_decimal",
+] }
+tokio = { version = "1.48", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["io-util"] }
+tokio-util = "0.7"
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["full"] }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+uuid = { version = "1.18.1", features = ["serde"] }
+csv-async = "1.3"
+rust_decimal = "1.39"
+geo = "0.31"
+cached = { version = "0.56", features = ["async", "tokio", "async-trait"] }
+nom = "8.0"
+sindit-senml = "0.2"
+serde_json = "1.0.145"
+hifitime = "4.2"
+iso8601 = "0.6"
+duckdb = { version = "1.4", features = ["bundled"], optional = true }
+config = "0.15"
+serde = "1.0"
+confique = { version = "0.4", features = ["toml"] }
+byte-unit = "5.1"
+prost = "0.14"
+snap = "1.1"
+rusty-chunkenc = "0.1"
+hex = "0.4"
+blake3 = "1.8"
+regex = "1.12"
+influxdb-line-protocol = "2.0"
+flate2 = "1.1.4"
+smallvec = "1.15"
+once_cell = "1.21"
+urlencoding = "2.1"
+hybridmap = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+sentry = { version = "0.45", features = ["anyhow", "tower"] }
+url = "2.5.7"
+gcp-bigquery-client = { version = "0.27", optional = true }
+sinteflake = { version = "0.1", features = ["async"] }
+tonic = { version = "0.14", optional = true }
+bigdecimal = { version = "0.4", optional = true }
+big-decimal-byte-string-encoder = { version = "0.1", optional = true }
+clru = "0.6"
+utoipa = { version = "5.4", features = ["axum_extras"] }
+utoipa-scalar = { version = "0.3", features = ["axum"] }
+rrdcached-client = { version = "0.1", optional = true }
+clickhouse = { version = "0.14", features = [
+  "lz4",
+  "uuid",
+  "time",
+  "inserter",
+], optional = true }
+rustls = "0.23"
+
+[dev-dependencies]
+temp-env = "0.3"
+tokio-test = "0.4"
+serial_test = "3.1"
+# Re-import the same crate with test-utils feature for integration tests
+sensapp = { path = ".", features = ["test-utils"], default-features = false }
