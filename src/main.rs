@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result};
 use fred::prelude::{ClientLike, EventInterface};
+mod auth;
 mod config;
 mod http;
 mod storage;

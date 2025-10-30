@@ -20,11 +20,11 @@ pub(crate) struct ApiToken {
 }
 
 pub(crate) async fn client_from_config(config: &RVFAConfig) -> Result<fred::clients::Client> {
-    let mut valkey_config = Config::from_url(&config.redis_url)?;
-    if let Some(username) = &config.redis_username {
+    let mut valkey_config = Config::from_url(&config.valkey_url)?;
+    if let Some(username) = &config.valkey_username {
         valkey_config.username = Some(username.clone());
     }
-    if let Some(password) = &config.redis_password {
+    if let Some(password) = &config.valkey_password {
         valkey_config.password = Some(password.clone());
     }
     let client = Builder::from_config(valkey_config)
@@ -167,7 +167,7 @@ mod tests {
 
     /// Helper function to create a test client connected to localhost:6379
     async fn setup_test_client() -> fred::clients::Client {
-        let config = Config::from_url("redis://localhost:6379").expect("Invalid Redis URL");
+        let config = Config::from_url("valkey://localhost:6379").expect("Invalid Valkey URL");
         let client = Builder::from_config(config)
             .build()
             .expect("Failed to build client");
@@ -175,7 +175,7 @@ mod tests {
         client
             .wait_for_connect()
             .await
-            .expect("Failed to connect to Redis");
+            .expect("Failed to connect to Valkey");
         client
     }
 
@@ -221,7 +221,7 @@ mod tests {
             .exists(&token_key)
             .await
             .expect("Failed to check existence");
-        assert!(exists, "Token hash should exist in Redis");
+        assert!(exists, "Token hash should exist in Valkey");
 
         // Verify all fields are stored correctly
         let sub: Option<String> = client
@@ -446,13 +446,13 @@ mod tests {
             .expect("Failed to delete token");
         assert!(deleted, "Delete should return true");
 
-        // Verify the token hash is removed from Redis
+        // Verify the token hash is removed from Valkey
         let token_key = format!("auth:token:{}", token_hash);
         let exists: bool = client
             .exists(&token_key)
             .await
             .expect("Failed to check existence");
-        assert!(!exists, "Token hash should be removed from Redis");
+        assert!(!exists, "Token hash should be removed from Valkey");
 
         // Verify the hash is removed from the user's token set
         let user_tokens_key = format!("auth:user_tokens:{}", user_sub);

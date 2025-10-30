@@ -16,13 +16,18 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 utoipa = { version = "5.4", features = ["axum_extras"] }
 utoipa-scalar = { version = "0.3", features = ["axum"] }
-rand = { version = "0.9", default-features = false, features = ["std", "os_rng"] }
+rand = { version = "0.9", default-features = false, features = [
+  "std",
+  "os_rng",
+] }
 tracing = "0.1"
 blake3 = "1.5"
 hex = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 http = "1.1"
 base64 = "0.22"
+tower-helmet = "0.3"
+tower-oauth2-resource-server = { version = "0.8.0", path = "example/tower-oauth2-resource-server/tower-oauth2-resource-server" }
 
 [dev-dependencies]
 serial_test = "3.2"

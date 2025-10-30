@@ -1,9 +1,9 @@
-use crate::config::RVFAConfig;
-use crate::storage;
+use crate::{auth, config::RVFAConfig, storage};
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::{Json, Router};
@@ -15,26 +15,34 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tower::limit::ConcurrencyLimitLayer;
+use tower_helmet::HelmetLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
-use tracing::Level;
+use tracing::{Level, debug, info, warn};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_scalar::{Scalar, Servable as ScalarServable};
 
 #[derive(Clone)]
 pub struct AppState {
     pub client: fred::clients::Client,
-    pub blake3_key: [u8; 32],
+    pub token_salt: [u8; 32],
+    pub auth: Arc<auth::AuthState>,
 }
 
 pub async fn serve(config: &RVFAConfig, client: fred::clients::Client) -> anyhow::Result<()> {
-    let blake3_key = config.blake3_key_bytes()?;
-    let state = AppState { client, blake3_key };
+    let token_salt = config.token_salt_bytes()?;
+    let auth_state = Arc::new(auth::AuthState::from_config(&config.oauth).await?);
+    let state = AppState {
+        client,
+        token_salt,
+        auth: auth_state,
+    };
 
     let address = SocketAddr::from((config.address, config.port));
-    tracing::info!("HTTP server binding on {}", address);
+    info!("HTTP server binding on http://{}", address);
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind HTTP listener on {}", address))?;
@@ -49,17 +57,38 @@ pub async fn serve(config: &RVFAConfig, client: fred::clients::Client) -> anyhow
 
 fn build_router(state: AppState) -> Router {
     let openapi = ApiDoc::openapi();
-
-    Router::new()
+    let mut router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .route(
-            "/api/users/{sub}/tokens",
-            get(list_tokens).post(create_token),
-        )
-        .route("/api/users/{sub}/tokens/{id}", delete(delete_token))
         .route("/forward-auth", get(forward_auth))
-        .merge(Scalar::with_url("/docs", openapi))
+        .merge(Scalar::with_url("/docs", openapi));
+
+    let auth_state = state.auth.clone();
+    let oauth_layer = auth_state
+        .oauth_layer()
+        .expect("OAuth2 resource server must be configured");
+
+    let admin_router = Router::new()
+        .route("/users/{sub}/tokens", get(list_tokens).post(create_token))
+        .route("/users/{sub}/tokens/{id}", delete(delete_token))
+        .layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            require_admin,
+        ))
+        .layer(oauth_layer.clone())
+        .layer(HelmetLayer::with_defaults());
+
+    let user_router = Router::new()
+        .route("/tokens", get(list_my_tokens).post(create_my_token))
+        .route("/tokens/{id}", delete(delete_my_token))
+        .layer(oauth_layer)
+        .layer(HelmetLayer::with_defaults());
+
+    router = router
+        .nest("/api", admin_router)
+        .nest("/api/me", user_router);
+
+    router
         .layer(ConcurrencyLimitLayer::new(1024))
         .layer(TimeoutLayer::new(Duration::from_secs(15)))
         .layer(
@@ -70,6 +99,36 @@ fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+async fn require_admin(
+    State(auth_state): State<Arc<auth::AuthState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if !auth_state.is_enabled() {
+        warn!("admin middleware invoked without oauth configuration");
+        return Err(ApiError::internal("oauth not configured for admin routes"));
+    }
+
+    let claims_ref = match req.extensions().get::<auth::AuthClaims>() {
+        Some(claims) => claims,
+        None => {
+            warn!("admin request missing oauth claims");
+            return Err(ApiError::unauthorized("missing oauth claims"));
+        }
+    };
+
+    let subject = claims_ref.sub.as_deref().unwrap_or("<unknown>");
+    let is_admin = auth_state.user_has_admin_access(claims_ref);
+
+    if !is_admin {
+        warn!(subject = subject, "admin privileges required");
+        return Err(ApiError::forbidden("admin privileges required"));
+    }
+
+    debug!(subject = subject, "admin access granted");
+    Ok(next.run(req).await)
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -78,6 +137,9 @@ fn build_router(state: AppState) -> Router {
         list_tokens,
         create_token,
         delete_token,
+        list_my_tokens,
+        create_my_token,
+        delete_my_token,
         forward_auth
     ),
     components(
@@ -92,6 +154,7 @@ fn build_router(state: AppState) -> Router {
     tags(
         (name = "health", description = "Health endpoints"),
         (name = "tokens", description = "API token management"),
+        (name = "user-tokens", description = "Authenticated user token management"),
         (name = "forward-auth", description = "Traefik forward auth compatibility")
     )
 )]
@@ -122,6 +185,10 @@ impl ApiError {
 
     fn unauthorized(message: impl Into<Cow<'static, str>>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, message)
+    }
+
+    fn forbidden(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, message)
     }
 
     fn not_found(message: impl Into<Cow<'static, str>>) -> Self {
@@ -175,8 +242,8 @@ async fn live() -> Json<HealthStatus> {
 )]
 async fn ready(State(state): State<AppState>) -> Result<Json<HealthStatus>, ApiError> {
     state.client.ping::<String>(None).await.map_err(|err| {
-        tracing::warn!("readiness ping failed: {:?}", err);
-        ApiError::internal("redis unavailable")
+        warn!("readiness ping failed: {:?}", err);
+        ApiError::internal("valkey unavailable")
     })?;
 
     Ok(Json(HealthStatus { status: "ready" }))
@@ -187,6 +254,38 @@ struct TokenSummary {
     id: String,
     description: Option<String>,
     created_at: String,
+}
+
+async fn list_tokens_for_subject(
+    client: &fred::clients::Client,
+    sub: &str,
+) -> Result<Vec<TokenSummary>, ApiError> {
+    let tokens = storage::list_user_tokens(client, sub)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(tokens
+        .into_iter()
+        .map(|token| TokenSummary {
+            id: token.id,
+            description: if token.description.is_empty() {
+                None
+            } else {
+                Some(token.description)
+            },
+            created_at: token.created_at,
+        })
+        .collect())
+}
+
+fn subject_from_claims(state: &AppState, claims: &auth::AuthClaims) -> Result<String, ApiError> {
+    match state.auth.subject_from_claims(claims) {
+        Some(subject) => Ok(subject),
+        None => {
+            warn!("oauth claims missing subject");
+            Err(ApiError::unauthorized("subject claim missing"))
+        }
+    }
 }
 
 #[utoipa::path(
@@ -205,27 +304,151 @@ async fn list_tokens(
     State(state): State<AppState>,
     Path(sub): Path<String>,
 ) -> Result<Json<Vec<TokenSummary>>, ApiError> {
-    let tokens = storage::list_user_tokens(&state.client, &sub)
-        .await
-        .map_err(ApiError::from)?;
+    let subject = sub.trim().to_string();
+    let summaries = list_tokens_for_subject(&state.client, &subject).await?;
+    let token_count = summaries.len();
+    info!(
+        actor = "admin",
+        subject = subject.as_str(),
+        token_count = token_count,
+        "listed tokens for subject"
+    );
+    Ok(Json(summaries))
+}
 
-    let summaries = tokens
-        .into_iter()
-        .map(|token| TokenSummary {
-            id: token.id,
-            description: if token.description.is_empty() {
-                None
-            } else {
-                Some(token.description)
-            },
-            created_at: token.created_at,
-        })
-        .collect();
-
+#[utoipa::path(
+    get,
+    path = "/api/me/tokens",
+    tag = "user-tokens",
+    responses(
+        (status = 200, body = [TokenSummary]),
+        (status = 401, body = ApiErrorBody),
+        (status = 500, body = ApiErrorBody)
+    )
+)]
+async fn list_my_tokens(
+    State(state): State<AppState>,
+    Extension(claims): Extension<auth::AuthClaims>,
+) -> Result<Json<Vec<TokenSummary>>, ApiError> {
+    let subject = subject_from_claims(&state, &claims)?;
+    let summaries = list_tokens_for_subject(&state.client, &subject).await?;
+    let token_count = summaries.len();
+    info!(
+        actor = "self",
+        subject = subject.as_str(),
+        token_count = token_count,
+        "listed own tokens"
+    );
     Ok(Json(summaries))
 }
 
 const MAX_DESCRIPTION_LENGTH: usize = 256;
+
+async fn create_token_for_subject(
+    state: &AppState,
+    subject: &str,
+    description: Option<String>,
+) -> Result<CreateTokenResponse, ApiError> {
+    let subject = subject.trim();
+    if subject.is_empty() {
+        warn!("attempted to create token with empty subject");
+        return Err(ApiError::bad_request("subject must not be empty"));
+    }
+
+    const TOKEN_LENGTH: usize = 32; // 256 bits
+    let raw_token = generate_token(TOKEN_LENGTH);
+    let token_hash = hash_token(&raw_token, &state.token_salt);
+
+    let description = description
+        .map(|desc| desc.trim().to_string())
+        .filter(|desc| !desc.is_empty())
+        .unwrap_or_default();
+
+    if description.len() > MAX_DESCRIPTION_LENGTH {
+        warn!(
+            subject = subject,
+            description_length = description.len(),
+            "token description exceeds limit"
+        );
+        return Err(ApiError::bad_request(format!(
+            "description exceeds {} characters",
+            MAX_DESCRIPTION_LENGTH
+        )));
+    }
+
+    storage::create_api_token(&state.client, subject, &token_hash, &description)
+        .await
+        .map_err(ApiError::from)?;
+
+    let created = storage::read_api_token(&state.client, &token_hash)
+        .await
+        .map_err(ApiError::from)?
+        .context("stored token missing after creation")
+        .map_err(ApiError::from)?;
+
+    let storage::ApiToken {
+        sub: stored_sub,
+        description: stored_description,
+        created_at,
+    } = created;
+
+    Ok(CreateTokenResponse {
+        token: raw_token,
+        id: token_hash,
+        sub: stored_sub,
+        description: if stored_description.is_empty() {
+            None
+        } else {
+            Some(stored_description)
+        },
+        created_at,
+    })
+}
+
+async fn delete_token_for_subject(
+    client: &fred::clients::Client,
+    subject: &str,
+    token_id: &str,
+) -> Result<StatusCode, ApiError> {
+    let owner = storage::read_api_token_sub(client, token_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    match owner {
+        Some(owner_sub) if owner_sub == subject => {
+            let deleted = storage::delete_api_token(client, token_id)
+                .await
+                .map_err(ApiError::from)?;
+            if deleted {
+                Ok(StatusCode::NO_CONTENT)
+            } else {
+                debug!(
+                    subject = subject,
+                    token_id = token_id,
+                    "token was missing during delete despite matching ownership"
+                );
+                Err(ApiError::not_found("token not found"))
+            }
+        }
+        Some(owner_sub) => {
+            debug!(
+                requested_subject = subject,
+                owner = owner_sub.as_str(),
+                token_id = token_id,
+                "token delete rejected for mismatched owner"
+            );
+            Err(ApiError::not_found("token not found"))
+        }
+        None => {
+            debug!(
+                subject = subject,
+                token_id = token_id,
+                "token delete rejected because token does not exist"
+            );
+            Err(ApiError::not_found("token not found"))
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 struct CreateTokenRequest {
@@ -266,54 +489,47 @@ async fn create_token(
     Path(raw_sub): Path<String>,
     Json(payload): Json<CreateTokenRequest>,
 ) -> Result<(StatusCode, Json<CreateTokenResponse>), ApiError> {
-    if raw_sub.trim().is_empty() {
-        return Err(ApiError::bad_request("subject must not be empty"));
-    }
+    let response = create_token_for_subject(&state, &raw_sub, payload.description).await?;
+    let subject_ref = response.sub.as_str();
+    let token_id_ref = response.id.as_str();
+    info!(
+        actor = "admin",
+        subject = subject_ref,
+        token_id = token_id_ref,
+        "created API token"
+    );
+    Ok((StatusCode::CREATED, Json(response)))
+}
 
-    const TOKEN_LENGTH: usize = 32; // 256 bits
-    let raw_token = generate_token(TOKEN_LENGTH);
-    let token_hash = hash_token(&raw_token, &state.blake3_key);
-    let description = payload
-        .description
-        .map(|desc| desc.trim().to_string())
-        .filter(|desc| !desc.is_empty())
-        .unwrap_or_default();
-
-    if description.len() > MAX_DESCRIPTION_LENGTH {
-        return Err(ApiError::bad_request(format!(
-            "description exceeds {} characters",
-            MAX_DESCRIPTION_LENGTH
-        )));
-    }
-
-    storage::create_api_token(&state.client, &raw_sub, &token_hash, &description)
-        .await
-        .map_err(ApiError::from)?;
-
-    let created = storage::read_api_token(&state.client, &token_hash)
-        .await
-        .map_err(ApiError::from)?
-        .context("stored token missing after creation")
-        .map_err(ApiError::from)?;
-
-    let storage::ApiToken {
-        sub: stored_sub,
-        description: stored_description,
-        created_at,
-    } = created;
-
-    let response = CreateTokenResponse {
-        token: raw_token,
-        id: token_hash,
-        sub: stored_sub,
-        description: if stored_description.is_empty() {
-            None
-        } else {
-            Some(stored_description)
-        },
-        created_at,
-    };
-
+#[utoipa::path(
+    post,
+    path = "/api/me/tokens",
+    tag = "user-tokens",
+    request_body(
+        content = CreateTokenRequest,
+        description = "Optional description"
+    ),
+    responses(
+        (status = 201, body = CreateTokenResponse),
+        (status = 401, body = ApiErrorBody),
+        (status = 400, body = ApiErrorBody),
+        (status = 500, body = ApiErrorBody)
+    )
+)]
+async fn create_my_token(
+    State(state): State<AppState>,
+    Extension(claims): Extension<auth::AuthClaims>,
+    Json(payload): Json<CreateTokenRequest>,
+) -> Result<(StatusCode, Json<CreateTokenResponse>), ApiError> {
+    let subject = subject_from_claims(&state, &claims)?;
+    let response = create_token_for_subject(&state, &subject, payload.description).await?;
+    let token_id_ref = response.id.as_str();
+    info!(
+        actor = "self",
+        subject = subject.as_str(),
+        token_id = token_id_ref,
+        "created API token"
+    );
     Ok((StatusCode::CREATED, Json(response)))
 }
 
@@ -335,23 +551,74 @@ async fn delete_token(
     State(state): State<AppState>,
     Path((sub, token_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let owner = storage::read_api_token_sub(&state.client, &token_id)
-        .await
-        .map_err(ApiError::from)?;
-
-    match owner {
-        Some(owner_sub) if owner_sub == sub => {
-            let deleted = storage::delete_api_token(&state.client, &token_id)
-                .await
-                .map_err(ApiError::from)?;
-            if deleted {
-                Ok(StatusCode::NO_CONTENT)
-            } else {
-                Err(ApiError::not_found("token not found"))
-            }
+    let subject = sub.trim().to_string();
+    let token_id = token_id.trim().to_string();
+    match delete_token_for_subject(&state.client, &subject, &token_id).await {
+        Ok(status) => {
+            info!(
+                actor = "admin",
+                subject = subject.as_str(),
+                token_id = token_id.as_str(),
+                "deleted API token"
+            );
+            Ok(status)
         }
-        Some(_) => Err(ApiError::not_found("token not found")),
-        None => Err(ApiError::not_found("token not found")),
+        Err(err) => {
+            let status_code = err.status;
+            warn!(
+                actor = "admin",
+                subject = subject.as_str(),
+                token_id = token_id.as_str(),
+                status = %status_code,
+                "failed to delete API token"
+            );
+            Err(err)
+        }
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/me/tokens/{id}",
+    tag = "user-tokens",
+    params(
+        ("id" = String, Path, description = "Token identifier (hashed)")
+    ),
+    responses(
+        (status = 204),
+        (status = 401, body = ApiErrorBody),
+        (status = 404, body = ApiErrorBody),
+        (status = 500, body = ApiErrorBody)
+    )
+)]
+async fn delete_my_token(
+    State(state): State<AppState>,
+    Extension(claims): Extension<auth::AuthClaims>,
+    Path(token_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let subject = subject_from_claims(&state, &claims)?;
+    let token_id = token_id.trim().to_string();
+    match delete_token_for_subject(&state.client, &subject, &token_id).await {
+        Ok(status) => {
+            info!(
+                actor = "self",
+                subject = subject.as_str(),
+                token_id = token_id.as_str(),
+                "deleted API token"
+            );
+            Ok(status)
+        }
+        Err(err) => {
+            let status_code = err.status;
+            warn!(
+                actor = "self",
+                subject = subject.as_str(),
+                token_id = token_id.as_str(),
+                status = %status_code,
+                "failed to delete API token"
+            );
+            Err(err)
+        }
     }
 }
 
@@ -378,14 +645,34 @@ async fn forward_auth(
     Query(query): Query<ForwardAuthQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let token = extract_token(query.token.as_deref(), &headers)
-        .ok_or_else(|| ApiError::unauthorized("missing token"))?;
+    let token = match extract_token(query.token.as_deref(), &headers) {
+        Some(token) => token,
+        None => {
+            warn!("forward-auth request missing token");
+            return Err(ApiError::unauthorized("missing token"));
+        }
+    };
 
-    let token_hash = hash_token(&token, &state.blake3_key);
-    let sub = storage::read_api_token_sub(&state.client, &token_hash)
+    let token_hash = hash_token(&token, &state.token_salt);
+    let sub = match storage::read_api_token_sub(&state.client, &token_hash)
         .await
         .map_err(ApiError::from)?
-        .ok_or_else(|| ApiError::unauthorized("invalid token"))?;
+    {
+        Some(subject) => subject,
+        None => {
+            warn!(
+                token_id = token_hash.as_str(),
+                "forward-auth rejected unknown token"
+            );
+            return Err(ApiError::unauthorized("invalid token"));
+        }
+    };
+
+    info!(
+        subject = sub.as_str(),
+        token_id = token_hash.as_str(),
+        "forward-auth accepted token"
+    );
 
     Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -484,8 +771,8 @@ fn trim_non_empty(token: &str) -> Option<&str> {
     }
 }
 
-fn hash_token(token: &str, key: &[u8; 32]) -> String {
-    blake3::keyed_hash(key, token.as_bytes())
+fn hash_token(token: &str, salt: &[u8; 32]) -> String {
+    blake3::keyed_hash(salt, token.as_bytes())
         .to_hex()
         .to_string()
 }
@@ -530,25 +817,28 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+    use axum::extract::Extension;
     use axum::http::{HeaderValue, header};
     use fred::interfaces::KeysInterface;
     use fred::prelude::{Builder, Config};
     use serial_test::serial;
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
 
-    const TEST_BLAKE3_KEY: [u8; 32] = [0u8; 32];
+    const TEST_TOKEN_SALT: [u8; 32] = [0u8; 32];
 
     async fn setup_test_client() -> fred::clients::Client {
-        let config = Config::from_url("redis://localhost:6379").expect("invalid redis url");
+        let config = Config::from_url("valkey://localhost:6379").expect("invalid valkey url");
         let client = Builder::from_config(config)
             .build()
-            .expect("failed to build redis client");
+            .expect("failed to build valkey client");
         client.connect();
         client
             .wait_for_connect()
             .await
-            .expect("failed to connect to redis");
+            .expect("failed to connect to valkey");
         client
     }
 
@@ -570,14 +860,27 @@ mod tests {
         let _: Result<(), _> = client.del(format!("auth:user_tokens:{}", user_sub)).await;
     }
 
+    fn build_state(client: fred::clients::Client) -> AppState {
+        AppState {
+            client,
+            token_salt: TEST_TOKEN_SALT,
+            auth: Arc::new(auth::AuthState::disabled_for_tests()),
+        }
+    }
+
+    async fn build_state_with_oauth(client: fred::clients::Client) -> AppState {
+        AppState {
+            client,
+            token_salt: TEST_TOKEN_SALT,
+            auth: Arc::new(auth::AuthState::for_tests_with_layer().await),
+        }
+    }
+
     #[tokio::test]
     #[serial]
     async fn build_router_registers_routes_without_panic() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client: client.clone(),
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state_with_oauth(client.clone()).await;
 
         // If the route definitions use an invalid syntax (e.g. old `:param` segments),
         // axum panics when constructing the router. This ensures we notice regressions.
@@ -599,10 +902,10 @@ mod tests {
 
     #[test]
     fn hash_token_is_deterministic() {
-        let first = hash_token("example-token", &TEST_BLAKE3_KEY);
-        let second = hash_token("example-token", &TEST_BLAKE3_KEY);
+        let first = hash_token("example-token", &TEST_TOKEN_SALT);
+        let second = hash_token("example-token", &TEST_TOKEN_SALT);
         assert_eq!(first, second);
-        // Hash with keyed blake3 using all-zeros key
+        // Hash with keyed blake3 using an all-zeros salt
         assert_eq!(
             first,
             "2d00e35e3e78f77fa4eb0454a48fb41e45963e0f9b5a335be231a2b582790189"
@@ -699,10 +1002,7 @@ mod tests {
     #[serial]
     async fn ready_returns_ready_when_ping_succeeds() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client: client.clone(),
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client.clone());
 
         let Json(status) = ready(State(state)).await.expect("ready ok");
         assert_eq!(status.status, "ready");
@@ -712,16 +1012,13 @@ mod tests {
     #[serial]
     async fn list_tokens_returns_stored_tokens() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client: client.clone(),
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client.clone());
         let sub = format!("user_{}", test_suffix());
 
         let token_one = "token-one";
         let token_two = "token-two";
-        let hash_one = hash_token(token_one, &TEST_BLAKE3_KEY);
-        let hash_two = hash_token(token_two, &TEST_BLAKE3_KEY);
+        let hash_one = hash_token(token_one, &TEST_TOKEN_SALT);
+        let hash_two = hash_token(token_two, &TEST_TOKEN_SALT);
 
         storage::create_api_token(&client, &sub, &hash_one, "first")
             .await
@@ -752,12 +1049,63 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn list_my_tokens_returns_authenticated_token_set() {
+        let client = setup_test_client().await;
+        let state = build_state(client.clone());
+        let sub = format!("user_{}", test_suffix());
+
+        let hash_one = hash_token("token-one", &TEST_TOKEN_SALT);
+        let hash_two = hash_token("token-two", &TEST_TOKEN_SALT);
+
+        storage::create_api_token(&client, &sub, &hash_one, "")
+            .await
+            .expect("store token");
+        storage::create_api_token(&client, &sub, &hash_two, "device")
+            .await
+            .expect("store token");
+
+        let claims = Extension(auth::AuthClaims {
+            iss: None,
+            sub: Some(sub.clone()),
+            aud: Vec::new(),
+            jti: None,
+            extra: HashMap::new(),
+        });
+
+        let Json(tokens) = list_my_tokens(State(state.clone()), claims)
+            .await
+            .expect("list tokens");
+        assert_eq!(tokens.len(), 2);
+
+        cleanup_token(&client, &hash_one, &sub).await;
+        cleanup_token(&client, &hash_two, &sub).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_my_tokens_rejects_missing_subject_claim() {
+        let client = setup_test_client().await;
+        let state = build_state(client.clone());
+
+        let claims = Extension(auth::AuthClaims {
+            iss: None,
+            sub: None,
+            aud: Vec::new(),
+            jti: None,
+            extra: HashMap::new(),
+        });
+
+        let err = list_my_tokens(State(state), claims)
+            .await
+            .expect_err("subject should be required");
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn create_token_stores_and_returns_token() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client: client.clone(),
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client.clone());
         let sub = format!("user_{}", test_suffix());
 
         let payload = CreateTokenRequest {
@@ -773,7 +1121,7 @@ mod tests {
         assert_eq!(response.sub, sub);
         assert_eq!(response.description.as_deref(), Some("api access"));
         assert_eq!(response.token.len(), 32); // 256 bits
-        assert_eq!(hash_token(&response.token, &TEST_BLAKE3_KEY), response.id);
+        assert_eq!(hash_token(&response.token, &TEST_TOKEN_SALT), response.id);
 
         let stored = storage::read_api_token(&client, &response.id)
             .await
@@ -786,12 +1134,45 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn create_my_token_uses_subject_from_claims() {
+        let client = setup_test_client().await;
+        let state = build_state(client.clone());
+        let sub = format!("user_{}", test_suffix());
+
+        let claims = Extension(auth::AuthClaims {
+            iss: None,
+            sub: Some(sub.clone()),
+            aud: Vec::new(),
+            jti: None,
+            extra: HashMap::new(),
+        });
+
+        let payload = CreateTokenRequest {
+            description: Some("self-service".into()),
+        };
+
+        let (status, Json(response)) = create_my_token(State(state.clone()), claims, Json(payload))
+            .await
+            .expect("token created");
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(response.sub, sub);
+        assert_eq!(response.description.as_deref(), Some("self-service"));
+
+        let stored = storage::read_api_token(&client, &response.id)
+            .await
+            .expect("read token")
+            .expect("token present");
+        assert_eq!(stored.sub, response.sub);
+
+        cleanup_token(&client, &response.id, &stored.sub).await;
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn create_token_rejects_empty_subject() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client,
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client);
 
         let payload = CreateTokenRequest { description: None };
 
@@ -806,10 +1187,7 @@ mod tests {
     #[serial]
     async fn create_token_rejects_overlong_description() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client,
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client);
         let sub = format!("user_{}", test_suffix());
         let payload = CreateTokenRequest {
             description: Some("x".repeat(MAX_DESCRIPTION_LENGTH + 1)),
@@ -826,13 +1204,10 @@ mod tests {
     #[serial]
     async fn delete_token_removes_existing_token() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client: client.clone(),
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client.clone());
         let sub = format!("user_{}", test_suffix());
         let token = "delete-me";
-        let hash = hash_token(token, &TEST_BLAKE3_KEY);
+        let hash = hash_token(token, &TEST_TOKEN_SALT);
 
         storage::create_api_token(&client, &sub, &hash, "")
             .await
@@ -853,16 +1228,47 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn delete_my_token_removes_owned_token() {
+        let client = setup_test_client().await;
+        let state = build_state(client.clone());
+        let sub = format!("user_{}", test_suffix());
+        let token = "self-delete";
+        let hash = hash_token(token, &TEST_TOKEN_SALT);
+
+        storage::create_api_token(&client, &sub, &hash, "")
+            .await
+            .expect("store token");
+
+        let claims = Extension(auth::AuthClaims {
+            iss: None,
+            sub: Some(sub.clone()),
+            aud: Vec::new(),
+            jti: None,
+            extra: HashMap::new(),
+        });
+
+        let status = delete_my_token(State(state.clone()), claims, Path(hash.clone()))
+            .await
+            .expect("delete ok");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let stored = storage::read_api_token(&client, &hash)
+            .await
+            .expect("read token");
+        assert!(stored.is_none());
+
+        cleanup_token(&client, &hash, &sub).await;
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn delete_token_fails_for_wrong_owner() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client: client.clone(),
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client.clone());
         let real_sub = format!("user_{}", test_suffix());
         let wrong_sub = format!("user_{}", test_suffix());
         let token = "wrong-owner";
-        let hash = hash_token(token, &TEST_BLAKE3_KEY);
+        let hash = hash_token(token, &TEST_TOKEN_SALT);
 
         storage::create_api_token(&client, &real_sub, &hash, "")
             .await
@@ -878,15 +1284,41 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn delete_my_token_rejects_foreign_token() {
+        let client = setup_test_client().await;
+        let state = build_state(client.clone());
+        let real_sub = format!("user_{}", test_suffix());
+        let attacker_sub = format!("user_{}", test_suffix());
+        let hash = hash_token("shared-token", &TEST_TOKEN_SALT);
+
+        storage::create_api_token(&client, &real_sub, &hash, "")
+            .await
+            .expect("store token");
+
+        let claims = Extension(auth::AuthClaims {
+            iss: None,
+            sub: Some(attacker_sub.clone()),
+            aud: Vec::new(),
+            jti: None,
+            extra: HashMap::new(),
+        });
+
+        let err = delete_my_token(State(state), claims, Path(hash.clone()))
+            .await
+            .expect_err("should reject");
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+        cleanup_token(&client, &hash, &real_sub).await;
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn forward_auth_accepts_query_token() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client: client.clone(),
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client.clone());
         let sub = format!("user_{}", test_suffix());
         let token = "forward-query";
-        let hash = hash_token(token, &TEST_BLAKE3_KEY);
+        let hash = hash_token(token, &TEST_TOKEN_SALT);
 
         // Clean up any leftover data from previous failed test runs
         let _ = storage::delete_api_token(&client, &hash).await;
@@ -929,13 +1361,10 @@ mod tests {
     #[serial]
     async fn forward_auth_accepts_bearer_token() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client: client.clone(),
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client.clone());
         let sub = format!("user_{}", test_suffix());
         let token = "forward-header";
-        let hash = hash_token(token, &TEST_BLAKE3_KEY);
+        let hash = hash_token(token, &TEST_TOKEN_SALT);
 
         // Clean up any leftover data from previous failed test runs
         let _ = storage::delete_api_token(&client, &hash).await;
@@ -966,13 +1395,10 @@ mod tests {
     #[serial]
     async fn forward_auth_accepts_basic_token() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client: client.clone(),
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client.clone());
         let sub = format!("user_{}", test_suffix());
         let token = "forward-basic";
-        let hash = hash_token(token, &TEST_BLAKE3_KEY);
+        let hash = hash_token(token, &TEST_TOKEN_SALT);
 
         let _ = storage::delete_api_token(&client, &hash).await;
 
@@ -1004,10 +1430,7 @@ mod tests {
     #[serial]
     async fn forward_auth_rejects_missing_token() {
         let client = setup_test_client().await;
-        let state = AppState {
-            client,
-            blake3_key: TEST_BLAKE3_KEY,
-        };
+        let state = build_state(client);
         let headers = HeaderMap::new();
 
         let err = forward_auth(
