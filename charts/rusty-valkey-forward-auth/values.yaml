@@ -1,0 +1,132 @@
+replicaCount: 1
+
+image:
+  repository: rusty-valkey-forward-auth
+  pullPolicy: IfNotPresent
+  # tag: ""
+  # digest: ""
+
+# imagePullSecrets:
+#   - name: registry-creds
+
+# nameOverride: ""
+# fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  # name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+service:
+  type: ClusterIP
+  annotations: {}
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  # className: ""
+  annotations: {}
+  hosts:
+    - host: rusty-valkey-forward-auth.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+config:
+  # Override the listener port. Defaults to service.targetPort when unset.
+  # port: 8080
+
+  valkey:
+    # Defaults to the internal Valkey service when the bundled chart is enabled.
+    # url: redis://<release-name>-valkey:6379/0
+    # username: ""
+    # password: ""
+    # passwordSecret:
+    #   name: my-secret
+    #   key: valkey-password
+
+  # tokenSalt: ""
+  # tokenSaltSecret:
+  #   name: my-secret
+  #   key: token-salt
+
+  cors:
+    enabled: false
+    allowOrigins: []
+
+  oauth:
+    # issuerUrl: ""
+    # jwksUrl: ""
+    # tenantId: ""
+    audiences: []
+    # jwksRefreshIntervalSecs: 300
+    admin:
+      # group: admin
+      groupCaseSensitive: false
+    # claims: {}
+
+  frontend:
+    # appName: ""
+    # oidcAuthority: ""
+    # oidcClientId: ""
+    # oidcRedirectUri: ""
+
+valkey:
+  enabled: true
+  dataStorage:
+    # className: ""
+    requestedSize: 4Gi
+
+extraEnv: []
+# - name: RUST_LOG
+#   value: info
+# envFrom:
+#   - secretRef:
+#       name: additional-env
+
+# settingsToml: ""
+# settingsToml: |-
+#   [oauth]
+#   audiences = ["api"]
+
+resources: {}
+
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
