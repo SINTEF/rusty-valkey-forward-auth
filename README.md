@@ -21,6 +21,16 @@ Can be useful to provide an easy and old-school API key authentication mechanism
 - **Frontend**: Web UI in TypeScript + React + Vite
 - **Storage**: Valkey, a Redis fork, for token storage
 
+## Security
+
+Static API keys are somewhat less secure than JWT or other modern authentication methods. But they are convenient and widely supported by AI tools.
+
+This is about finding the right balance between security and usability.
+
+Tokens are generated with a cryptographically secure random generator, and stored as salted blake3 hashes in Valkey. If Valkey is compromised, stolen hashes cannot be used to authenticate.
+
+Notably, tokens do not expire. There is no rate limiting or brute-force protection implemented in this service. Brute-forcing 256-bit tokens is not feasible, but consider using additional protections higher up in your stack (e.g., Traefik rate limiting, WAF, etc.).
+
 ## Quick Start
 
 ### Prerequisites
@@ -28,23 +38,41 @@ Can be useful to provide an easy and old-school API key authentication mechanism
 - Rust 1.90+
 - Node.js 24+
 - Valkey on `localhost:6379`
-- An OAuth2/OIDC provider
+- An OAuth2/OIDC provider. Tested with Keycloak.
 
 ### Configuration
 
 Create `settings.toml` or use environment variables:
 
 ```toml
-[http]
+# HTTP Server Configuration
 address = "127.0.0.1"
 port = 8080
 
-[valkey]
-url = "redis://localhost:6379"
+# Valkey Configuration
+valkey_url = "redis://localhost:6379"
+# valkey_username = "your-username"  # Optional
+# valkey_password = "your-password"  # Optional
 
+# Token hashing salt (32 bytes hex-encoded, 64 characters)
+# IMPORTANT: Keep this secret and consistent across deployments
+# token_salt = "................................."  # 64 hex chars
+
+# Static files directory (optional, defaults to frontend/dist)
+# static_dir = "frontend/dist"
+
+# CORS Configuration
+[cors]
+enabled = false
+# allow_origins = ["http://localhost:5173"]  # Comma-separated in env: CORS_ALLOW_ORIGINS
+
+# OAuth2/OIDC Configuration
 [oauth]
 issuer_url = "https://your-oauth-provider"
 # OR: jwks_url = "https://your-jwks-endpoint"
+# tenant_id = "your-tenant-id"  # Optional
+# audiences = ["api://your-app"]  # Optional
+# jwks_refresh_interval_secs = 300  # Default: 300
 
 [oauth.claims]
 subject = "sub"
@@ -52,10 +80,18 @@ groups = "groups"
 
 [oauth.admin]
 group = "admin"
+# group_case_sensitive = false
 
+# Frontend Configuration
 [frontend]
 oidc_authority = "https://your-oauth-provider"
 oidc_client_id = "your-client-id"
+# oidc_redirect_uri = "http://localhost:8080/callback"  # Optional
+# api_base_url = "http://localhost:8080"  # Optional
+# app_name = "Rusty Valkey Forward Auth"  # Default shown
+# api_docs_path = "/docs"  # Default: /docs
+# docs_html = "<p>Custom HTML docs</p>"  # Optional
+# docs_html_file = "/path/to/docs.html"  # Optional
 ```
 
 ### Running

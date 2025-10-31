@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -30,7 +30,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{Level, debug, info, warn};
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
-use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
+use utoipa::{Modify, OpenApi, ToSchema};
 use utoipa_scalar::{Scalar, Servable as ScalarServable};
 
 #[derive(Clone)]
@@ -791,19 +791,10 @@ async fn delete_my_token(
     }
 }
 
-#[derive(Debug, Deserialize, IntoParams)]
-struct ForwardAuthQuery {
-    #[serde(default)]
-    token: Option<String>,
-}
-
 #[utoipa::path(
     get,
     path = "/forward-auth",
     tag = "forward-auth",
-    params(
-        ForwardAuthQuery
-    ),
     responses(
         (status = 204, description = "Token accepted"),
         (status = 401, body = ApiErrorBody)
@@ -811,10 +802,9 @@ struct ForwardAuthQuery {
 )]
 async fn forward_auth(
     State(state): State<AppState>,
-    Query(query): Query<ForwardAuthQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let token = match extract_token(query.token.as_deref(), &headers) {
+    let token = match extract_token(&headers) {
         Some(token) => token,
         None => {
             warn!("forward-auth request missing token");
@@ -851,25 +841,13 @@ async fn forward_auth(
         .map_err(|_| ApiError::internal("failed to build response"))
 }
 
-fn extract_token(query_token: Option<&str>, headers: &HeaderMap) -> Option<String> {
-    if let Some(token) = query_token.and_then(trim_non_empty) {
-        return Some(token.to_owned());
-    }
-
+fn extract_token(headers: &HeaderMap) -> Option<String> {
     if let Some(token) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(parse_authorization)
     {
         return Some(token);
-    }
-
-    if let Some(token) = headers
-        .get("X-API-Token")
-        .and_then(|value| value.to_str().ok())
-        .and_then(trim_non_empty)
-    {
-        return Some(token.to_owned());
     }
 
     None
@@ -931,15 +909,6 @@ fn parse_basic_authorization(value: &str) -> Option<String> {
     Some(decoded.to_string())
 }
 
-fn trim_non_empty(token: &str) -> Option<&str> {
-    let trimmed = token.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 fn hash_token(token: &str, salt: &[u8; 32]) -> String {
     blake3::keyed_hash(salt, token.as_bytes())
         .to_hex()
@@ -948,14 +917,32 @@ fn hash_token(token: &str, salt: &[u8; 32]) -> String {
 
 fn generate_token(length: usize) -> String {
     const ALPHANUMERIC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    if length == 0 {
+        return String::new();
+    }
+
     let mut rng = OsRng;
+    let alphabet_len = ALPHANUMERIC.len() as u32;
+    let max_multiple = ((u32::from(u8::MAX) + 1) / alphabet_len) * alphabet_len; // largest multiple <= 256
+    let mut token = String::with_capacity(length);
     let mut bytes = vec![0u8; length];
-    rng.try_fill_bytes(&mut bytes)
-        .expect("operating system RNG unavailable");
-    bytes
-        .into_iter()
-        .map(|b| ALPHANUMERIC[(b as usize) % ALPHANUMERIC.len()] as char)
-        .collect()
+
+    while token.len() < length {
+        rng.try_fill_bytes(&mut bytes)
+            .expect("operating system RNG unavailable");
+        for &byte in &bytes {
+            let value = u32::from(byte);
+            if value < max_multiple {
+                let idx = (value % alphabet_len) as usize;
+                token.push(ALPHANUMERIC[idx] as char);
+                if token.len() == length {
+                    break;
+                }
+            }
+        }
+    }
+
+    token
 }
 
 async fn shutdown_signal() {
@@ -1123,38 +1110,20 @@ mod tests {
     }
 
     #[test]
-    fn extract_token_prefers_query_parameter() {
-        let mut headers = HeaderMap::new();
-        headers.append(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer header-token"),
-        );
-        headers.append("X-API-Token", HeaderValue::from_static("header-fallback"));
-
-        let token = extract_token(Some(" query-token "), &headers);
-        assert_eq!(token.as_deref(), Some("query-token"));
-    }
-
-    #[test]
-    fn extract_token_reads_from_headers() {
+    fn extract_token_reads_from_authorization_header() {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer header-token "),
         );
-        let token = extract_token(None, &headers);
+        let token = extract_token(&headers);
         assert_eq!(token.as_deref(), Some("header-token"));
-
-        let mut headers = HeaderMap::new();
-        headers.insert("X-API-Token", HeaderValue::from_static(" api-token "));
-        let token = extract_token(None, &headers);
-        assert_eq!(token.as_deref(), Some("api-token"));
     }
 
     #[test]
     fn extract_token_returns_none_when_unavailable() {
         let headers = HeaderMap::new();
-        assert!(extract_token(None, &headers).is_none());
+        assert!(extract_token(&headers).is_none());
     }
 
     #[test]
@@ -1165,7 +1134,7 @@ mod tests {
             HeaderValue::from_static("bearer MixedCaseToken"),
         );
 
-        let token = extract_token(None, &headers);
+        let token = extract_token(&headers);
         assert_eq!(token.as_deref(), Some("MixedCaseToken"));
     }
 
@@ -1178,7 +1147,7 @@ mod tests {
             HeaderValue::from_str(&format!("Basic {}", encoded)).unwrap(),
         );
 
-        let token = extract_token(None, &headers);
+        let token = extract_token(&headers);
         assert_eq!(token.as_deref(), Some("my-secret-token"));
 
         let encoded = BASE64_STANDARD.encode("token-without-password:");
@@ -1187,7 +1156,7 @@ mod tests {
             HeaderValue::from_str(&format!("Basic {}", encoded)).unwrap(),
         );
 
-        let token = extract_token(None, &headers);
+        let token = extract_token(&headers);
         assert_eq!(token.as_deref(), Some("token-without-password"));
     }
 
@@ -1513,52 +1482,6 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn forward_auth_accepts_query_token() {
-        let client = setup_test_client().await;
-        let state = build_state(client.clone());
-        let sub = format!("user_{}", test_suffix());
-        let token = "forward-query";
-        let hash = hash_token(token, &TEST_TOKEN_SALT);
-
-        // Clean up any leftover data from previous failed test runs
-        let _ = storage::delete_api_token(&client, &hash).await;
-
-        storage::create_api_token(&client, &sub, &hash, "")
-            .await
-            .expect("store token");
-
-        let headers = HeaderMap::new();
-        let response = forward_auth(
-            State(state),
-            Query(ForwardAuthQuery {
-                token: Some(token.to_string()),
-            }),
-            headers,
-        )
-        .await
-        .expect("auth ok");
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(
-            response
-                .headers()
-                .get("X-Authenticated-User")
-                .map(|v| v.to_str().unwrap()),
-            Some(sub.as_str())
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get("X-Authenticated-Token-Id")
-                .map(|v| v.to_str().unwrap()),
-            Some(hash.as_str())
-        );
-
-        cleanup_token(&client, &hash, &sub).await;
-    }
-
-    #[tokio::test]
-    #[serial]
     async fn forward_auth_accepts_bearer_token() {
         let client = setup_test_client().await;
         let state = build_state(client.clone());
@@ -1578,13 +1501,7 @@ mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("bearer {}", token)).unwrap(),
         );
-        let response = forward_auth(
-            State(state),
-            Query(ForwardAuthQuery { token: None }),
-            headers,
-        )
-        .await
-        .expect("auth ok");
+        let response = forward_auth(State(state), headers).await.expect("auth ok");
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
@@ -1613,13 +1530,7 @@ mod tests {
             HeaderValue::from_str(&format!("Basic {}", encoded)).unwrap(),
         );
 
-        let response = forward_auth(
-            State(state),
-            Query(ForwardAuthQuery { token: None }),
-            headers,
-        )
-        .await
-        .expect("auth ok");
+        let response = forward_auth(State(state), headers).await.expect("auth ok");
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
@@ -1633,13 +1544,9 @@ mod tests {
         let state = build_state(client);
         let headers = HeaderMap::new();
 
-        let err = forward_auth(
-            State(state),
-            Query(ForwardAuthQuery { token: None }),
-            headers,
-        )
-        .await
-        .expect_err("should reject");
+        let err = forward_auth(State(state), headers)
+            .await
+            .expect_err("should reject");
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
     }
 }

@@ -5,6 +5,10 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+/// Default token salt (echo rusty-valkey-forward-auth | sha256sum).
+pub(crate) const DEFAULT_TOKEN_SALT_HEX: &str =
+    "3794447850d23a5db972dbe556437ec2edfe4294687843d7f0587bd9535beecf";
+
 #[derive(Config)]
 pub(crate) struct RVFAConfig {
     /// Port to listen on.
@@ -29,11 +33,7 @@ pub(crate) struct RVFAConfig {
 
     /// Token hashing salt (32 bytes hex-encoded, 64 characters). Used as the keyed blake3 salt.
     /// IMPORTANT: Keep this secret and consistent across deployments.
-    #[config(
-        env = "TOKEN_SALT",
-        // echo rusty-valkey-forward-auth | sha256sum
-        default = "3794447850d23a5db972dbe556437ec2edfe4294687843d7f0587bd9535beecf"
-    )]
+    #[config(env = "TOKEN_SALT")]
     pub token_salt: String,
 
     #[config(nested)]
@@ -48,6 +48,7 @@ pub(crate) struct RVFAConfig {
 
     #[config(nested)]
     pub frontend: FrontendConfig,
+
 }
 
 impl RVFAConfig {
@@ -68,6 +69,19 @@ impl RVFAConfig {
         }
 
         config.frontend.materialize(&config.oauth)?;
+
+        if config.token_salt.trim().is_empty() {
+            config.token_salt = DEFAULT_TOKEN_SALT_HEX.to_string();
+        }
+
+        if config
+            .token_salt
+            .eq_ignore_ascii_case(DEFAULT_TOKEN_SALT_HEX)
+        {
+            tracing::warn!(
+                "TOKEN_SALT is using the built-in default; generate a unique salt for production."
+            );
+        }
 
         Ok(config)
     }
