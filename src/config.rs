@@ -48,7 +48,6 @@ pub(crate) struct RVFAConfig {
 
     #[config(nested)]
     pub frontend: FrontendConfig,
-
 }
 
 impl RVFAConfig {
