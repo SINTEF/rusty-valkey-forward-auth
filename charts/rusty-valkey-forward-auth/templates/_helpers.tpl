@@ -62,6 +62,13 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Resolve the managed secret name for configuration values.
+*/}}
+{{- define "rusty-valkey-forward-auth.secretName" -}}
+{{- printf "%s-config" (include "rusty-valkey-forward-auth.fullname" .) }}
+{{- end }}
+
+{{/*
 Derive the Valkey fullname as rendered by the dependent chart so we can build defaults.
 */}}
 {{- define "rusty-valkey-forward-auth.valkeyFullname" -}}
@@ -105,6 +112,8 @@ Secret references take precedence over literal values when both are provided.
 - name: PORT
   value: {{ printf "%v" (default $targetPort $port) | quote }}
 {{- end }}
+- name: ADDRESS
+  value: "0.0.0.0"
 {{- $valkey := $cfg.valkey | default dict }}
 {{- $valkeyURL := tpl (default "" $valkey.url) $root | trim }}
 {{- if not $valkeyURL }}
@@ -118,9 +127,21 @@ Secret references take precedence over literal values when both are provided.
   value: {{ $valkeyURL | quote }}
 {{- end }}
 {{- $valkeyUser := tpl (default "" $valkey.username) $root | trim }}
-{{- if $valkeyUser }}
+{{- $valkeyUsernameSecret := $valkey.usernameSecret | default dict }}
+{{- $valkeyUsernameSecretName := tpl (default "" $valkeyUsernameSecret.name) $root | trim }}
+{{- $valkeyUsernameSecretKey := tpl (default "" $valkeyUsernameSecret.key) $root | trim }}
+{{- if and $valkeyUsernameSecretName $valkeyUsernameSecretKey }}
 - name: VALKEY_USERNAME
-  value: {{ $valkeyUser | quote }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $valkeyUsernameSecretName }}
+      key: {{ $valkeyUsernameSecretKey }}
+{{- else if $valkeyUser }}
+- name: VALKEY_USERNAME
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "rusty-valkey-forward-auth.secretName" $root }}
+      key: valkey-username
 {{- end }}
 {{- $valkeyPasswordSecret := $valkey.passwordSecret | default dict }}
 {{- $valkeyPasswordSecretName := tpl (default "" $valkeyPasswordSecret.name) $root | trim }}
@@ -135,7 +156,10 @@ Secret references take precedence over literal values when both are provided.
   {{- $valkeyPassword := tpl (default "" $valkey.password) $root | trim }}
   {{- if $valkeyPassword }}
 - name: VALKEY_PASSWORD
-  value: {{ $valkeyPassword | quote }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "rusty-valkey-forward-auth.secretName" $root }}
+      key: valkey-password
   {{- end }}
 {{- end }}
 {{- $tokenSaltSecret := $cfg.tokenSaltSecret | default dict }}
@@ -151,7 +175,10 @@ Secret references take precedence over literal values when both are provided.
   {{- $tokenSalt := tpl (default "" $cfg.tokenSalt) $root | trim }}
   {{- if $tokenSalt }}
 - name: TOKEN_SALT
-  value: {{ $tokenSalt | quote }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "rusty-valkey-forward-auth.secretName" $root }}
+      key: token-salt
   {{- end }}
 {{- end }}
 {{- $cors := $cfg.cors | default dict }}

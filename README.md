@@ -155,10 +155,21 @@ Multi-stage build: Rust backend + Node.js frontend compiled, served from distrol
 
 ### Kubernetes (Helm)
 
+`values.example.yaml`:
+
+```yaml
+config:
+  tokenSalt: ".................................."  # 64 hex chars
+  oauth:
+    issuerUrl: https://keycloak_or_whatever/realms/your-realm
+  frontend:
+    appName: "Your App Name"
+    oidcAuthority: https://keycloak_or_whatever/realms/your-realm
+    oidcClientId: your-client-id
+```
+
 ```bash
-helm install rvfa ./charts/rusty-valkey-forward-auth \
-  --set valkey.url=redis://valkey:6379 \
-  --set oauth.issuerUrl=https://your-oauth-provider
+helm install rvfa ./charts/rusty-valkey-forward-auth -f values.example.yaml
 ```
 
 See [charts/rusty-valkey-forward-auth/](charts/rusty-valkey-forward-auth/) for full Helm configuration.
@@ -197,6 +208,17 @@ http:
 - `GET /health/live` - Liveness probe
 - `GET /health/ready` - Readiness probe
 - `GET /forward-auth` - Forward auth validator
+
+## Testing API Keys
+
+```bash
+curl "http://localhost:8080/forward-auth"
+# should return 401 Unauthorized
+
+curl "http://localhost:8080/forward-auth" \
+     -H "Authorization: Bearer ..."
+# should return 204 No Content if the key is valid
+```
 
 ## License
 
