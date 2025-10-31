@@ -9,17 +9,9 @@ Can be useful to provide an easy and old-school API key authentication mechanism
 ## Features
 
 - **Forward Auth**: Request validation for Traefik proxy
-- **Token Management**: Create, list, and delete API tokens via OAuth2-secured APIs
-- **Token Storage**: Tokens stored as blake3 hashes in Valkey with Lua script synchronization
-- **Web UI**: React-based interface for user self-service token management
-- **OAuth2/OIDC**: Integrated OAuth2 resource server for API and UI authentication
-- **Multi-user**: Admin APIs for managing tokens across users, self-service APIs for personal tokens
-
-## Stack
-
-- **Backend**: Stateless HTTP API in Rust
-- **Frontend**: Web UI in TypeScript + React + Vite
-- **Storage**: Valkey, a Redis fork, for token storage
+- **Token Management API**: Create, list, and delete API tokens via OAuth2-secured APIs
+- **Token Management Frontend**: Simple web UI for managing tokens, for end users.
+- **Multi-user**: Supports multiple users, each with their own tokens, through OAuth2/OIDC authentication.
 
 ## Security
 
@@ -30,6 +22,12 @@ This is about finding the right balance between security and usability.
 Tokens are generated with a cryptographically secure random generator, and stored as salted blake3 hashes in Valkey. If Valkey is compromised, stolen hashes cannot be used to authenticate.
 
 Notably, tokens do not expire. There is no rate limiting or brute-force protection implemented in this service. Brute-forcing 256-bit tokens is not feasible, but consider using additional protections higher up in your stack (e.g., Traefik rate limiting, WAF, etc.).
+
+## Stack
+
+- **Backend**: Stateless HTTP API in Rust
+- **Frontend**: Web UI in TypeScript + React + Vite
+- **Storage**: Valkey, a Redis fork, for token storage
 
 ## Quick Start
 
