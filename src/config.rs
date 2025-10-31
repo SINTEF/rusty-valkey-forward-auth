@@ -160,14 +160,13 @@ impl FrontendConfig {
 
         self.oidc_redirect_uri = take_trimmed(self.oidc_redirect_uri.take());
 
-        if let Some(path) = self.docs_html_file.take() {
-            if !path.as_os_str().is_empty() {
+        if let Some(path) = self.docs_html_file.take()
+            && !path.as_os_str().is_empty() {
                 let html = fs::read_to_string(&path).with_context(|| {
                     format!("failed to read FRONTEND_DOCS_HTML_FILE {}", path.display())
                 })?;
                 self.docs_html = Some(html);
             }
-        }
 
         self.docs_html = self.docs_html.take().and_then(|html| {
             if html.trim().is_empty() {
