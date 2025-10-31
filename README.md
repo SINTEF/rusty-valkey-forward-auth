@@ -4,6 +4,8 @@ Lightweight API Key management solution. Supports OAuth2/OIDC authentication, Va
 
 Can be useful to provide an easy and old-school API key authentication mechanism to a HTTP service behind Traefik.
 
+![Screenshot](./screenshot.png)
+
 ## Features
 
 - **Forward Auth**: Request validation for Traefik proxy
