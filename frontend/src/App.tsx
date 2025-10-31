@@ -9,6 +9,7 @@ import {
   type CreateTokenResponse,
   type TokenSummary,
 } from './api/tokens';
+import { API_BASE_URL, API_DOCS_PATH, APP_NAME, DOCS_HTML } from './config';
 
 function App() {
   const auth = useAuth();
@@ -28,6 +29,11 @@ function App() {
   const [lastCreatedToken, setLastCreatedToken] = useState<CreateTokenResponse | null>(null);
   const [hasCopiedToken, setHasCopiedToken] = useState(false);
   const [confirmingTokenId, setConfirmingTokenId] = useState<string | null>(null);
+  const docsHref =
+    API_DOCS_PATH.startsWith('http://') || API_DOCS_PATH.startsWith('https://')
+      ? API_DOCS_PATH
+      : `${API_BASE_URL}${API_DOCS_PATH}`;
+  const showDocsLink = docsHref.trim().length > 0;
 
   const tokensQuery = useQuery<TokenSummary[], Error>({
     queryKey: ['api', 'tokens', accessToken],
@@ -145,10 +151,16 @@ function App() {
   if (!isAuthenticated) {
     return (
       <div className="screen">
-        <h1>Sign in required</h1>
+        <h1>{APP_NAME}</h1>
+        <p className="muted">Sign in required</p>
         <button type="button" onClick={() => signinRedirect()}>
           Sign in
         </button>
+        {showDocsLink && (
+          <a className="docs-link" href={docsHref} target="_blank" rel="noreferrer">
+            Token API docs
+          </a>
+        )}
       </div>
     );
   }
@@ -169,7 +181,7 @@ function App() {
     <div className="screen">
       <header className="header">
         <div>
-          <h1>API tokens</h1>
+          <h1>{APP_NAME}</h1>
           <p className="muted">Signed in as {identityName}</p>
         </div>
         <button type="button" onClick={() => signoutRedirect()}>
@@ -294,6 +306,23 @@ function App() {
           </p>
         )}
       </section>
+
+      {(showDocsLink || DOCS_HTML) && (
+        <section className="section">
+          <h2>Token API reference</h2>
+          {showDocsLink && (
+            <p className="muted">
+              API key management docs:{' '}
+              <a className="docs-link" href={docsHref} target="_blank" rel="noreferrer">
+                Open token API docs
+              </a>
+            </p>
+          )}
+          {DOCS_HTML && (
+            <div className="docs-content" dangerouslySetInnerHTML={{ __html: DOCS_HTML }} />
+          )}
+        </section>
+      )}
     </div>
   );
 }

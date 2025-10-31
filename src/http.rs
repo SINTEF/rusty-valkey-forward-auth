@@ -1,6 +1,6 @@
 use crate::{
     auth,
-    config::{CorsConfig, RVFAConfig},
+    config::{CorsConfig, FrontendPublicConfig, RVFAConfig},
     storage,
 };
 use anyhow::Context;
@@ -19,11 +19,13 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_helmet::HelmetLayer;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{Level, debug, info, warn};
@@ -36,16 +38,19 @@ pub struct AppState {
     pub client: fred::clients::Client,
     pub token_salt: [u8; 32],
     pub auth: Arc<auth::AuthState>,
+    pub frontend: FrontendPublicConfig,
 }
 
 pub async fn serve(config: &RVFAConfig, client: fred::clients::Client) -> anyhow::Result<()> {
     let token_salt = config.token_salt_bytes()?;
     let auth_state = Arc::new(auth::AuthState::from_config(&config.oauth).await?);
     let cors_layer = cors_layer_from_config(&config.cors)?;
+    let frontend_config = config.frontend.public_view();
     let state = AppState {
         client,
         token_salt,
         auth: auth_state,
+        frontend: frontend_config,
     };
 
     let address = SocketAddr::from((config.address, config.port));
@@ -54,7 +59,9 @@ pub async fn serve(config: &RVFAConfig, client: fred::clients::Client) -> anyhow
         .await
         .with_context(|| format!("failed to bind HTTP listener on {}", address))?;
 
-    let router = build_router(state, cors_layer);
+    let static_dir = config.static_dir.clone();
+
+    let router = build_router(state, cors_layer, static_dir);
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
@@ -62,11 +69,16 @@ pub async fn serve(config: &RVFAConfig, client: fred::clients::Client) -> anyhow
         .context("HTTP server exited unexpectedly")
 }
 
-fn build_router(state: AppState, cors_layer: Option<CorsLayer>) -> Router {
+fn build_router(
+    state: AppState,
+    cors_layer: Option<CorsLayer>,
+    static_dir: Option<PathBuf>,
+) -> Router {
     let openapi = ApiDoc::openapi();
     let mut router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .route("/frontend/config", get(frontend_config))
         .route("/forward-auth", get(forward_auth))
         .merge(Scalar::with_url("/docs", openapi));
 
@@ -94,6 +106,30 @@ fn build_router(state: AppState, cors_layer: Option<CorsLayer>) -> Router {
     router = router
         .nest("/api", admin_router)
         .nest("/api/me", user_router);
+
+    if let Some(static_dir) = static_dir {
+        if static_dir.is_dir() {
+            info!(
+                path = %static_dir.display(),
+                "serving static frontend assets"
+            );
+            let index_file = static_dir.join("index.html");
+            if !index_file.is_file() {
+                warn!(
+                    path = %index_file.display(),
+                    "static frontend index file missing; SPA fallback may fail"
+                );
+            }
+            router = router.fallback_service(
+                ServeDir::new(static_dir).not_found_service(ServeFile::new(index_file)),
+            );
+        } else {
+            warn!(
+                path = %static_dir.display(),
+                "static frontend directory not found; skipping static asset serving"
+            );
+        }
+    }
 
     let router = router
         .layer(ConcurrencyLimitLayer::new(1024))
@@ -186,6 +222,7 @@ async fn require_admin(
     paths(
         live,
         ready,
+        frontend_config,
         list_tokens,
         create_token,
         delete_token,
@@ -198,6 +235,7 @@ async fn require_admin(
         schemas(
             ApiErrorBody,
             HealthStatus,
+            FrontendConfigResponse,
             TokenSummary,
             CreateTokenRequest,
             CreateTokenResponse
@@ -205,6 +243,7 @@ async fn require_admin(
     ),
     tags(
         (name = "health", description = "Health endpoints"),
+        (name = "frontend", description = "Public metadata shared with the bundled frontend."),
         (name = "admin-token-management", description = "Administrator-only APIs for managing tokens on behalf of any subject. Requires OAuth2 bearer authentication with admin privileges."),
         (name = "self-token-management", description = "Self-service APIs for authenticated users to manage their own tokens via OAuth2 bearer authentication."),
         (name = "forward-auth", description = "Traefik forward auth compatibility")
@@ -323,6 +362,36 @@ async fn ready(State(state): State<AppState>) -> Result<Json<HealthStatus>, ApiE
     })?;
 
     Ok(Json(HealthStatus { status: "ready" }))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct FrontendConfigResponse {
+    app_name: String,
+    api_base_url: Option<String>,
+    oidc_authority: Option<String>,
+    oidc_client_id: Option<String>,
+    oidc_redirect_uri: Option<String>,
+    docs_html: Option<String>,
+    api_docs_path: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/frontend/config",
+    tag = "frontend",
+    responses((status = 200, body = FrontendConfigResponse))
+)]
+async fn frontend_config(State(state): State<AppState>) -> Json<FrontendConfigResponse> {
+    let cfg = &state.frontend;
+    Json(FrontendConfigResponse {
+        app_name: cfg.app_name.clone(),
+        api_base_url: cfg.api_base_url.clone(),
+        oidc_authority: cfg.oidc_authority.clone(),
+        oidc_client_id: cfg.oidc_client_id.clone(),
+        oidc_redirect_uri: cfg.oidc_redirect_uri.clone(),
+        docs_html: cfg.docs_html.clone(),
+        api_docs_path: cfg.api_docs_path.clone(),
+    })
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -917,7 +986,7 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use axum::extract::Extension;
+    use axum::extract::{Extension, State};
     use axum::http::{HeaderValue, header};
     use fred::interfaces::KeysInterface;
     use fred::prelude::{Builder, Config};
@@ -960,11 +1029,24 @@ mod tests {
         let _: Result<(), _> = client.del(format!("auth:user_tokens:{}", user_sub)).await;
     }
 
+    fn test_frontend_config() -> FrontendPublicConfig {
+        FrontendPublicConfig {
+            api_base_url: Some("http://localhost:8080".to_string()),
+            app_name: "Valkey Token Manager".to_string(),
+            oidc_authority: Some("https://example.test/auth".to_string()),
+            oidc_client_id: Some("test-client-id".to_string()),
+            oidc_redirect_uri: None,
+            docs_html: Some("<p>Example documentation</p>".to_string()),
+            api_docs_path: "/docs".to_string(),
+        }
+    }
+
     fn build_state(client: fred::clients::Client) -> AppState {
         AppState {
             client,
             token_salt: TEST_TOKEN_SALT,
             auth: Arc::new(auth::AuthState::disabled_for_tests()),
+            frontend: test_frontend_config(),
         }
     }
 
@@ -973,6 +1055,7 @@ mod tests {
             client,
             token_salt: TEST_TOKEN_SALT,
             auth: Arc::new(auth::AuthState::for_tests_with_layer().await),
+            frontend: test_frontend_config(),
         }
     }
 
@@ -984,7 +1067,24 @@ mod tests {
 
         // If the route definitions use an invalid syntax (e.g. old `:param` segments),
         // axum panics when constructing the router. This ensures we notice regressions.
-        let _ = build_router(state, None);
+        let _ = build_router(state, None, None);
+    }
+
+    #[tokio::test]
+    async fn frontend_config_returns_frontend_metadata() {
+        let client = setup_test_client().await;
+        let state = build_state(client);
+        let response = frontend_config(State(state)).await;
+        let Json(body) = response;
+        assert_eq!(body.app_name, "Valkey Token Manager");
+        assert_eq!(body.api_base_url.as_deref(), Some("http://localhost:8080"));
+        assert_eq!(
+            body.oidc_authority.as_deref(),
+            Some("https://example.test/auth")
+        );
+        assert_eq!(body.oidc_client_id.as_deref(), Some("test-client-id"));
+        assert_eq!(body.api_docs_path, "/docs");
+        assert!(body.docs_html.as_deref().is_some());
     }
 
     #[tokio::test]

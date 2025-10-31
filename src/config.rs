@@ -1,7 +1,9 @@
-use anyhow::Error;
+use anyhow::{Context, Error};
 use confique::Config;
 use std::convert::Infallible;
+use std::fs;
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 #[derive(Config)]
 pub(crate) struct RVFAConfig {
@@ -39,12 +41,35 @@ pub(crate) struct RVFAConfig {
 
     #[config(nested)]
     pub oauth: OAuthConfig,
+
+    /// Directory containing pre-built frontend assets to serve at `/`.
+    #[config(env = "STATIC_DIR")]
+    pub static_dir: Option<PathBuf>,
+
+    #[config(nested)]
+    pub frontend: FrontendConfig,
 }
 
 impl RVFAConfig {
     pub fn load() -> Result<Self, Error> {
         let file = std::env::var("CONFIG_FILE").unwrap_or("settings.toml".to_string());
-        Ok(RVFAConfig::builder().env().file(file).load()?)
+        let mut config = <Self as Config>::builder().env().file(file).load()?;
+
+        if config
+            .static_dir
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            config.static_dir = None;
+        }
+
+        if config.static_dir.is_none() {
+            config.static_dir = Some(PathBuf::from("frontend/dist"));
+        }
+
+        config.frontend.materialize(&config.oauth)?;
+
+        Ok(config)
     }
 
     pub fn token_salt_bytes(&self) -> Result<[u8; 32], Error> {
@@ -59,6 +84,148 @@ impl RVFAConfig {
         key.copy_from_slice(&decoded);
         Ok(key)
     }
+}
+
+#[derive(Clone, Config)]
+pub(crate) struct FrontendConfig {
+    /// Optional override for the API base URL consumed by the frontend.
+    #[config(env = "FRONTEND_API_BASE_URL")]
+    pub api_base_url: Option<String>,
+
+    /// Human-friendly application name for the frontend.
+    #[config(env = "FRONTEND_APP_NAME", default = "Valkey Token Manager")]
+    pub app_name: String,
+
+    /// Authority URL for the frontend OIDC client.
+    #[config(env = "FRONTEND_OIDC_AUTHORITY")]
+    pub oidc_authority: Option<String>,
+
+    /// Client identifier for the frontend OIDC client.
+    #[config(env = "FRONTEND_OIDC_CLIENT_ID")]
+    pub oidc_client_id: Option<String>,
+
+    /// Optional redirect URI override for the frontend OIDC client.
+    #[config(env = "FRONTEND_OIDC_REDIRECT_URI")]
+    pub oidc_redirect_uri: Option<String>,
+
+    /// Path to an HTML snippet rendered within the frontend.
+    #[config(env = "FRONTEND_DOCS_HTML_FILE")]
+    pub docs_html_file: Option<PathBuf>,
+
+    /// Inline HTML snippet rendered within the frontend.
+    #[config(env = "FRONTEND_DOCS_HTML")]
+    pub docs_html: Option<String>,
+
+    /// Relative path (or absolute URL) to the API documentation.
+    #[config(env = "FRONTEND_API_DOCS_PATH", default = "/docs")]
+    pub api_docs_path: String,
+}
+
+#[derive(Clone)]
+pub struct FrontendPublicConfig {
+    pub api_base_url: Option<String>,
+    pub app_name: String,
+    pub oidc_authority: Option<String>,
+    pub oidc_client_id: Option<String>,
+    pub oidc_redirect_uri: Option<String>,
+    pub docs_html: Option<String>,
+    pub api_docs_path: String,
+}
+
+impl FrontendConfig {
+    fn materialize(&mut self, oauth: &OAuthConfig) -> Result<(), Error> {
+        self.api_base_url = take_trimmed(self.api_base_url.take()).map(normalize_base_url);
+
+        self.app_name = self.app_name.trim().to_string();
+        if self.app_name.is_empty() {
+            self.app_name = "Valkey Token Manager".to_string();
+        }
+
+        self.oidc_authority = take_trimmed(self.oidc_authority.take()).or_else(|| {
+            oauth.issuer_url.as_ref().and_then(|issuer| {
+                let trimmed = issuer.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        });
+
+        self.oidc_client_id = take_trimmed(self.oidc_client_id.take());
+
+        if self.oidc_client_id.is_none() {
+            self.oidc_client_id = Some("rusty-valkey-forward-auth-dev".to_string());
+        }
+
+        self.oidc_redirect_uri = take_trimmed(self.oidc_redirect_uri.take());
+
+        if let Some(path) = self.docs_html_file.take() {
+            if !path.as_os_str().is_empty() {
+                let html = fs::read_to_string(&path).with_context(|| {
+                    format!("failed to read FRONTEND_DOCS_HTML_FILE {}", path.display())
+                })?;
+                self.docs_html = Some(html);
+            }
+        }
+
+        self.docs_html = self.docs_html.take().and_then(|html| {
+            if html.trim().is_empty() {
+                None
+            } else {
+                Some(html)
+            }
+        });
+
+        let docs_path_trimmed = self.api_docs_path.trim();
+        if docs_path_trimmed.is_empty() {
+            self.api_docs_path = "/docs".to_string();
+        } else if docs_path_trimmed.starts_with("http://")
+            || docs_path_trimmed.starts_with("https://")
+        {
+            self.api_docs_path = docs_path_trimmed.to_string();
+        } else {
+            let normalized = docs_path_trimmed.trim_start_matches('/');
+            self.api_docs_path = format!("/{}", normalized);
+        }
+
+        Ok(())
+    }
+
+    pub fn public_view(&self) -> FrontendPublicConfig {
+        FrontendPublicConfig {
+            api_base_url: self.api_base_url.clone(),
+            app_name: self.app_name.clone(),
+            oidc_authority: self.oidc_authority.clone(),
+            oidc_client_id: self.oidc_client_id.clone(),
+            oidc_redirect_uri: self.oidc_redirect_uri.clone(),
+            docs_html: self.docs_html.clone(),
+            api_docs_path: self.api_docs_path.clone(),
+        }
+    }
+}
+
+fn take_trimmed(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn normalize_base_url(url: String) -> String {
+    if url == "/" {
+        return String::new();
+    }
+
+    let mut normalized = url;
+    while normalized.ends_with('/') && !normalized.ends_with("://") {
+        normalized.pop();
+    }
+    normalized
 }
 
 #[derive(Clone, Config)]
@@ -169,8 +336,8 @@ mod tests {
 
     #[test]
     fn parse_allows_wildcard_origin() {
-        let parsed = parse_cors_allow_origins("*,http://example.test")
-            .expect("parser should not fail");
+        let parsed =
+            parse_cors_allow_origins("*,http://example.test").expect("parser should not fail");
         assert_eq!(
             parsed,
             vec!["*".to_string(), "http://example.test".to_string()]
