@@ -27,7 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 http = "1.1"
 base64 = "0.22"
 tower-helmet = "0.3"
-tower-oauth2-resource-server = { version = "0.8.0", path = "example/tower-oauth2-resource-server/tower-oauth2-resource-server" }
+tower-oauth2-resource-server = "0.8.0"
 
 [dev-dependencies]
 serial_test = "3.2"
