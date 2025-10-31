@@ -1,0 +1,181 @@
+#root {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 4rem;
+}
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.header button {
+  white-space: nowrap;
+}
+
+.section {
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.token-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 28rem;
+}
+
+.token-form input {
+  font: inherit;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid #cbd5f5;
+  background-color: #f8fafc;
+  color: inherit;
+}
+
+.token-form input:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.notice {
+  border-left: 4px solid #2563eb;
+  background-color: #eff6ff;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.token-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  word-break: break-all;
+  background-color: #0f172a;
+  color: #f8fafc;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+
+.token-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.token-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  background-color: #f8fafc;
+}
+
+.token-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.token-name {
+  margin: 0;
+  font-weight: 600;
+}
+
+.muted {
+  color: #64748b;
+  margin: 0;
+}
+
+.status {
+  min-height: 50vh;
+  display: grid;
+  place-items: center;
+  color: #1e293b;
+  font-size: 1.1rem;
+}
+
+.status-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  text-align: center;
+}
+
+.status-panel button {
+  align-self: center;
+}
+
+.error {
+  color: #dc2626;
+}
+
+.token-actions {
+  display: flex;
+  align-items: center;
+}
+
+.confirm-delete {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.token-display {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.token-display .token-value {
+  flex: 1 1 auto;
+}
+
+.copy-button {
+  min-width: 6.0rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 640px) {
+  .token-card {
+    grid-template-columns: 1fr;
+  }
+
+  .confirm-delete {
+    align-items: stretch;
+  }
+
+  .confirm-actions {
+    flex-direction: column;
+  }
+}

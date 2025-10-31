@@ -57,9 +57,9 @@ impl AuthState {
             .filter(|value| !value.is_empty())
         {
             tenant_builder = tenant_builder.jwks_url(jwks_url);
-            tenant_builder = tenant_builder
-                .jwks_refresh_interval(Duration::from_secs(config.jwks_refresh_interval_secs));
         }
+        tenant_builder = tenant_builder
+            .jwks_refresh_interval(Duration::from_secs(config.jwks_refresh_interval_secs));
 
         if !config.audiences.is_empty() {
             let audiences = config

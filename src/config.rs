@@ -1,5 +1,6 @@
 use anyhow::Error;
 use confique::Config;
+use std::convert::Infallible;
 use std::net::IpAddr;
 
 #[derive(Config)]
@@ -32,6 +33,9 @@ pub(crate) struct RVFAConfig {
         default = "3794447850d23a5db972dbe556437ec2edfe4294687843d7f0587bd9535beecf"
     )]
     pub token_salt: String,
+
+    #[config(nested)]
+    pub cors: CorsConfig,
 
     #[config(nested)]
     pub oauth: OAuthConfig,
@@ -106,4 +110,70 @@ pub(crate) struct OAuthAdminConfig {
     /// Treat admin group comparisons as case-sensitive.
     #[config(env = "OAUTH_ADMIN_CASE_SENSITIVE", default = false)]
     pub group_case_sensitive: bool,
+}
+
+#[derive(Clone, Config, Default)]
+pub(crate) struct CorsConfig {
+    /// Enable CORS for the HTTP API.
+    #[config(env = "CORS_ENABLED", default = false)]
+    pub enabled: bool,
+
+    /// Origins allowed to access the API when CORS is enabled. Use "*" to allow any origin.
+    #[config(
+        env = "CORS_ALLOW_ORIGINS",
+        default = [],
+        parse_env = parse_cors_allow_origins
+    )]
+    pub allow_origins: Vec<String>,
+}
+
+fn parse_cors_allow_origins(raw: &str) -> Result<Vec<String>, Infallible> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(raw
+        .split(',')
+        .map(|origin| origin.trim())
+        .filter(|origin| !origin.is_empty())
+        .map(|origin| origin.to_string())
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cors_allow_origins;
+
+    #[test]
+    fn parse_empty_string_returns_empty_vec() {
+        let parsed = parse_cors_allow_origins("").expect("parser should not fail");
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_single_origin_trims_whitespace() {
+        let parsed =
+            parse_cors_allow_origins("  http://localhost:3000  ").expect("parser should not fail");
+        assert_eq!(parsed, vec!["http://localhost:3000".to_string()]);
+    }
+
+    #[test]
+    fn parse_multiple_origins_ignores_extra_commas() {
+        let parsed = parse_cors_allow_origins("http://one.test, http://two.test , ,")
+            .expect("parser should not fail");
+        assert_eq!(
+            parsed,
+            vec!["http://one.test".to_string(), "http://two.test".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_allows_wildcard_origin() {
+        let parsed = parse_cors_allow_origins("*,http://example.test")
+            .expect("parser should not fail");
+        assert_eq!(
+            parsed,
+            vec!["*".to_string(), "http://example.test".to_string()]
+        );
+    }
 }

@@ -1,8 +1,12 @@
-use crate::{auth, config::RVFAConfig, storage};
+use crate::{
+    auth,
+    config::{CorsConfig, RVFAConfig},
+    storage,
+};
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
@@ -19,10 +23,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_helmet::HelmetLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{Level, debug, info, warn};
-use utoipa::{IntoParams, OpenApi, ToSchema};
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use utoipa_scalar::{Scalar, Servable as ScalarServable};
 
 #[derive(Clone)]
@@ -35,6 +41,7 @@ pub struct AppState {
 pub async fn serve(config: &RVFAConfig, client: fred::clients::Client) -> anyhow::Result<()> {
     let token_salt = config.token_salt_bytes()?;
     let auth_state = Arc::new(auth::AuthState::from_config(&config.oauth).await?);
+    let cors_layer = cors_layer_from_config(&config.cors)?;
     let state = AppState {
         client,
         token_salt,
@@ -47,7 +54,7 @@ pub async fn serve(config: &RVFAConfig, client: fred::clients::Client) -> anyhow
         .await
         .with_context(|| format!("failed to bind HTTP listener on {}", address))?;
 
-    let router = build_router(state);
+    let router = build_router(state, cors_layer);
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
@@ -55,7 +62,7 @@ pub async fn serve(config: &RVFAConfig, client: fred::clients::Client) -> anyhow
         .context("HTTP server exited unexpectedly")
 }
 
-fn build_router(state: AppState) -> Router {
+fn build_router(state: AppState, cors_layer: Option<CorsLayer>) -> Router {
     let openapi = ApiDoc::openapi();
     let mut router = Router::new()
         .route("/health/live", get(live))
@@ -88,7 +95,7 @@ fn build_router(state: AppState) -> Router {
         .nest("/api", admin_router)
         .nest("/api/me", user_router);
 
-    router
+    let router = router
         .layer(ConcurrencyLimitLayer::new(1024))
         .layer(TimeoutLayer::new(Duration::from_secs(15)))
         .layer(
@@ -96,7 +103,52 @@ fn build_router(state: AppState) -> Router {
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
-        .with_state(state)
+        .with_state(state);
+
+    match cors_layer {
+        Some(layer) => router.layer(layer),
+        None => router,
+    }
+}
+
+fn cors_layer_from_config(config: &CorsConfig) -> anyhow::Result<Option<CorsLayer>> {
+    if !config.enabled {
+        return Ok(None);
+    }
+
+    let mut layer = CorsLayer::new()
+        .allow_methods(AllowMethods::list([
+            Method::GET,
+            Method::POST,
+            Method::DELETE,
+            Method::OPTIONS,
+        ]))
+        .allow_headers(AllowHeaders::list([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+        ]))
+        .max_age(Duration::from_secs(60 * 60));
+
+    if config.allow_origins.iter().any(|origin| origin == "*") {
+        layer = layer.allow_origin(AllowOrigin::any());
+    } else {
+        let origins = config
+            .allow_origins
+            .iter()
+            .map(|origin| {
+                HeaderValue::from_str(origin)
+                    .with_context(|| format!("invalid CORS origin {origin:?}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if origins.is_empty() {
+            anyhow::bail!("CORS is enabled but no allowed origins were configured");
+        }
+
+        layer = layer.allow_origin(AllowOrigin::list(origins));
+    }
+
+    Ok(Some(layer))
 }
 
 async fn require_admin(
@@ -153,12 +205,36 @@ async fn require_admin(
     ),
     tags(
         (name = "health", description = "Health endpoints"),
-        (name = "tokens", description = "API token management"),
-        (name = "user-tokens", description = "Authenticated user token management"),
+        (name = "admin-token-management", description = "Administrator-only APIs for managing tokens on behalf of any subject. Requires OAuth2 bearer authentication with admin privileges."),
+        (name = "self-token-management", description = "Self-service APIs for authenticated users to manage their own tokens via OAuth2 bearer authentication."),
         (name = "forward-auth", description = "Traefik forward auth compatibility")
-    )
+    ),
+    modifiers(&SecurityAddon)
 )]
 struct ApiDoc;
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        openapi
+            .components
+            .get_or_insert_with(Default::default)
+            .add_security_scheme(
+                "oauth2",
+                SecurityScheme::Http(
+                    HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .bearer_format("JWT")
+                        .description(Some(
+                            "OAuth2 / OpenID Connect access token validated against the configured issuer."
+                                .to_owned(),
+                        ))
+                        .build(),
+                ),
+            );
+    }
+}
 
 #[derive(Debug, Serialize, ToSchema)]
 struct ApiErrorBody {
@@ -291,12 +367,17 @@ fn subject_from_claims(state: &AppState, claims: &auth::AuthClaims) -> Result<St
 #[utoipa::path(
     get,
     path = "/api/users/{sub}/tokens",
-    tag = "tokens",
+    tag = "admin-token-management",
+    security(
+        ("oauth2" = [])
+    ),
     params(
         ("sub" = String, Path, description = "Subject identifier")
     ),
     responses(
         (status = 200, body = [TokenSummary]),
+        (status = 401, body = ApiErrorBody),
+        (status = 403, body = ApiErrorBody),
         (status = 500, body = ApiErrorBody)
     )
 )]
@@ -319,7 +400,10 @@ async fn list_tokens(
 #[utoipa::path(
     get,
     path = "/api/me/tokens",
-    tag = "user-tokens",
+    tag = "self-token-management",
+    security(
+        ("oauth2" = [])
+    ),
     responses(
         (status = 200, body = [TokenSummary]),
         (status = 401, body = ApiErrorBody),
@@ -470,7 +554,10 @@ struct CreateTokenResponse {
 #[utoipa::path(
     post,
     path = "/api/users/{sub}/tokens",
-    tag = "tokens",
+    tag = "admin-token-management",
+    security(
+        ("oauth2" = [])
+    ),
     params(
         ("sub" = String, Path, description = "Subject identifier")
     ),
@@ -480,6 +567,8 @@ struct CreateTokenResponse {
     ),
     responses(
         (status = 201, body = CreateTokenResponse),
+        (status = 401, body = ApiErrorBody),
+        (status = 403, body = ApiErrorBody),
         (status = 400, body = ApiErrorBody),
         (status = 500, body = ApiErrorBody)
     )
@@ -504,7 +593,10 @@ async fn create_token(
 #[utoipa::path(
     post,
     path = "/api/me/tokens",
-    tag = "user-tokens",
+    tag = "self-token-management",
+    security(
+        ("oauth2" = [])
+    ),
     request_body(
         content = CreateTokenRequest,
         description = "Optional description"
@@ -536,13 +628,18 @@ async fn create_my_token(
 #[utoipa::path(
     delete,
     path = "/api/users/{sub}/tokens/{id}",
-    tag = "tokens",
+    tag = "admin-token-management",
+    security(
+        ("oauth2" = [])
+    ),
     params(
         ("sub" = String, Path, description = "Subject identifier"),
         ("id" = String, Path, description = "Token identifier (hashed)")
     ),
     responses(
         (status = 204),
+        (status = 401, body = ApiErrorBody),
+        (status = 403, body = ApiErrorBody),
         (status = 404, body = ApiErrorBody),
         (status = 500, body = ApiErrorBody)
     )
@@ -580,7 +677,10 @@ async fn delete_token(
 #[utoipa::path(
     delete,
     path = "/api/me/tokens/{id}",
-    tag = "user-tokens",
+    tag = "self-token-management",
+    security(
+        ("oauth2" = [])
+    ),
     params(
         ("id" = String, Path, description = "Token identifier (hashed)")
     ),
@@ -884,7 +984,7 @@ mod tests {
 
         // If the route definitions use an invalid syntax (e.g. old `:param` segments),
         // axum panics when constructing the router. This ensures we notice regressions.
-        let _ = build_router(state);
+        let _ = build_router(state, None);
     }
 
     #[tokio::test]
