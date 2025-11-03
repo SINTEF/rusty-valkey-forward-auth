@@ -120,6 +120,14 @@ function App() {
     }
   };
 
+  const refresh = () => {
+    try {
+      window.sessionStorage.clear();
+    } finally {
+      window.location.reload();
+    }
+  };
+
   if (activeNavigator === 'signinSilent') {
     return <div className="status">Signing you in…</div>;
   }
@@ -139,9 +147,7 @@ function App() {
           <p className="error">Authentication failed: {error.message}</p>
           <button
             type="button"
-            onClick={() => {
-              window.location.reload();
-            }}
+            onClick={refresh}
           >
             Refresh
           </button>
