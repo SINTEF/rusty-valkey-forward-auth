@@ -92,10 +92,17 @@ config:
     # oidcAuthority: ""
     # oidcClientId: ""
     # oidcRedirectUri: ""
+    # docsHtmlContent: ""
+    # docsHtmlContent: |-
+    #   <h1>API Documentation</h1>
+    #   <p>Your custom HTML documentation here</p>
+    # When set, creates a ConfigMap with the HTML content and mounts it as a file.
+    # The application will serve this HTML in the frontend under "Token API reference".
 
 valkey:
   enabled: true
   dataStorage:
+    enabled: true
     # className: ""
     requestedSize: 4Gi
 
@@ -115,10 +122,12 @@ resources: {}
 
 livenessProbe:
   httpGet:
-    path: /health/live
+    path: /health/ready
     port: http
   initialDelaySeconds: 5
-  periodSeconds: 10
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
 
 readinessProbe:
   httpGet:
@@ -126,6 +135,8 @@ readinessProbe:
     port: http
   initialDelaySeconds: 5
   periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 2
 
 extraVolumes: []
 extraVolumeMounts: []

@@ -260,6 +260,10 @@ Secret references take precedence over literal values when both are provided.
 - name: FRONTEND_OIDC_REDIRECT_URI
   value: {{ $frontendRedirect | quote }}
 {{- end }}
+{{- if $frontend.docsHtmlContent }}
+- name: FRONTEND_DOCS_HTML_FILE
+  value: /docs/docs.html
+{{- end }}
 {{- if .Values.settingsToml }}
 - name: CONFIG_FILE
   value: /config/settings.toml

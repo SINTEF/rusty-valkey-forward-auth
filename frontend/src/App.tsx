@@ -34,6 +34,8 @@ function App() {
       ? API_DOCS_PATH
       : `${API_BASE_URL}${API_DOCS_PATH}`;
   const showDocsLink = docsHref.trim().length > 0;
+  const docsHtml = DOCS_HTML?.trim() ?? '';
+  const hasDocsContent = docsHtml.length > 0;
 
   const tokensQuery = useQuery<TokenSummary[], Error>({
     queryKey: ['api', 'tokens', accessToken],
@@ -189,6 +191,12 @@ function App() {
         </button>
       </header>
 
+      {hasDocsContent && (
+        <section className="section">
+          <div className="docs-content" dangerouslySetInnerHTML={{ __html: docsHtml }} />
+        </section>
+      )}
+
       <section className="section">
         <h2>Create a token</h2>
         <p className="muted">
@@ -307,20 +315,15 @@ function App() {
         )}
       </section>
 
-      {(showDocsLink || DOCS_HTML) && (
+      {showDocsLink && (
         <section className="section">
           <h2>Token API reference</h2>
-          {showDocsLink && (
-            <p className="muted">
-              API key management docs:{' '}
-              <a className="docs-link" href={docsHref} target="_blank" rel="noreferrer">
-                Open token API docs
-              </a>
-            </p>
-          )}
-          {DOCS_HTML && (
-            <div className="docs-content" dangerouslySetInnerHTML={{ __html: DOCS_HTML }} />
-          )}
+          <p className="muted">
+            API key management docs:{' '}
+            <a className="docs-link" href={docsHref} target="_blank" rel="noreferrer">
+              Open token API docs
+            </a>
+          </p>
         </section>
       )}
     </div>

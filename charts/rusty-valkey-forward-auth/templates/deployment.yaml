@@ -67,7 +67,8 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- $hasVolumeMounts := or .Values.settingsToml .Values.extraVolumeMounts }}
+          {{- $frontend := .Values.config.frontend | default dict }}
+          {{- $hasVolumeMounts := or .Values.settingsToml $frontend.docsHtmlContent .Values.extraVolumeMounts }}
           {{- if $hasVolumeMounts }}
           volumeMounts:
             {{- if .Values.settingsToml }}
@@ -76,17 +77,28 @@ spec:
               subPath: settings.toml
               readOnly: true
             {{- end }}
+            {{- if $frontend.docsHtmlContent }}
+            - name: docs
+              mountPath: /docs/docs.html
+              subPath: docs.html
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           {{- end }}
-      {{- $hasVolumes := or .Values.settingsToml .Values.extraVolumes }}
+      {{- $hasVolumes := or .Values.settingsToml $frontend.docsHtmlContent .Values.extraVolumes }}
       {{- if $hasVolumes }}
       volumes:
         {{- if .Values.settingsToml }}
         - name: settings
           configMap:
             name: {{ include "rusty-valkey-forward-auth.fullname" . }}-settings
+        {{- end }}
+        {{- if $frontend.docsHtmlContent }}
+        - name: docs
+          configMap:
+            name: {{ include "rusty-valkey-forward-auth.fullname" . }}-docs
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

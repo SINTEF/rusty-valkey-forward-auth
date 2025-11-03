@@ -1,0 +1,12 @@
+{{- $frontend := .Values.config.frontend | default dict }}
+{{- if $frontend.docsHtmlContent }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rusty-valkey-forward-auth.fullname" . }}-docs
+  labels:
+    {{- include "rusty-valkey-forward-auth.labels" . | nindent 4 }}
+data:
+  docs.html: |-
+    {{- tpl $frontend.docsHtmlContent . | nindent 4 }}
+{{- end }}
