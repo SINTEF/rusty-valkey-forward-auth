@@ -18,14 +18,11 @@ This chart deploys:
 
 ## Quick Start
 
-### Minimal Installation
+### Add the Helm Repository
 
 ```bash
-helm install rvfa ./charts/rusty-valkey-forward-auth \
-  --set config.tokenSalt="YOUR_64_HEX_CHARACTER_SALT" \
-  --set config.oauth.issuerUrl="https://your-oauth-provider/realms/your-realm" \
-  --set config.frontend.oidcAuthority="https://your-oauth-provider/realms/your-realm" \
-  --set config.frontend.oidcClientId="your-client-id"
+helm repo add rusty-valkey-forward-auth https://sintef.github.io/rusty-valkey-forward-auth
+helm repo update
 ```
 
 ### Generate Token Salt
@@ -37,6 +34,16 @@ openssl rand -hex 32
 ```
 
 Keep this value secret and consistent across deployments!
+
+### Minimal Installation
+
+```bash
+helm install rvfa rusty-valkey-forward-auth/rusty-valkey-forward-auth \
+  --set config.tokenSalt="YOUR_64_HEX_CHARACTER_SALT" \
+  --set config.oauth.issuerUrl="https://your-oauth-provider/realms/your-realm" \
+  --set config.frontend.oidcAuthority="https://your-oauth-provider/realms/your-realm" \
+  --set config.frontend.oidcClientId="your-client-id"
+```
 
 ### Using a Values File
 
@@ -54,6 +61,14 @@ config:
 ```
 
 Install:
+
+```bash
+helm install rvfa rusty-valkey-forward-auth/rusty-valkey-forward-auth -f my-values.yaml
+```
+
+### Installing from Source
+
+If you prefer to install directly from the repository source:
 
 ```bash
 helm install rvfa ./charts/rusty-valkey-forward-auth -f my-values.yaml

@@ -29,7 +29,48 @@ Notably, tokens do not expire. There is no rate limiting or brute-force protecti
 - **Frontend**: Web UI in TypeScript + React + Vite
 - **Storage**: Valkey, a Redis fork, for token storage
 
-## Quick Start
+## Deployment
+
+### Kubernetes (Helm)
+
+Add the Helm repository:
+
+```bash
+helm repo add rusty-valkey-forward-auth https://sintef.github.io/rusty-valkey-forward-auth
+helm repo update
+```
+
+Generate a secure token salt:
+
+```bash
+openssl rand -hex 32
+```
+
+Install the chart:
+
+```bash
+helm install rvfa rusty-valkey-forward-auth/rusty-valkey-forward-auth \
+  --set config.tokenSalt="your-64-character-hex-salt" \
+  --set config.oauth.issuerUrl="https://your-oauth-provider/realms/your-realm" \
+  --set config.frontend.oidcAuthority="https://your-oauth-provider/realms/your-realm" \
+  --set config.frontend.oidcClientId="your-client-id"
+```
+
+For advanced configuration options, including custom values files, ingress, and resource limits, see the [Helm chart documentation](charts/rusty-valkey-forward-auth/).
+
+## Traefik Integration
+
+Configure Traefik to use this service for forward authentication:
+
+```yaml
+http:
+  middlewares:
+    rusty-valkey-auth:
+      forwardAuth:
+        address: "http://rusty-valkey-forward-auth:8080/forward-auth"
+```
+
+## Development
 
 ### Prerequisites
 
@@ -101,8 +142,6 @@ cargo run
 
 The service runs on `http://localhost:8080` and serves the frontend UI at `/`.
 
-## Development
-
 ### Setup
 
 Install pre-commit hooks:
@@ -139,52 +178,6 @@ npm run lint     # Linting
 ```
 
 Set `VITE_API_BASE_URL` to point to your backend API (defaults to `http://localhost:8080`).
-
-## Deployment
-
-### Docker
-
-```bash
-docker build -t rusty-valkey-forward-auth .
-docker run -e VALKEY_URL=redis://host.docker.internal:6379 \
-           -p 8080:8080 \
-           rusty-valkey-forward-auth
-```
-
-Multi-stage build: Rust backend + Node.js frontend compiled, served from distroless runtime.
-
-### Kubernetes (Helm)
-
-`values.example.yaml`:
-
-```yaml
-config:
-  tokenSalt: ".................................."  # 64 hex chars
-  oauth:
-    issuerUrl: https://keycloak_or_whatever/realms/your-realm
-  frontend:
-    appName: "Your App Name"
-    oidcAuthority: https://keycloak_or_whatever/realms/your-realm
-    oidcClientId: your-client-id
-```
-
-```bash
-helm install rvfa ./charts/rusty-valkey-forward-auth -f values.example.yaml
-```
-
-See [charts/rusty-valkey-forward-auth/](charts/rusty-valkey-forward-auth/) for full Helm configuration.
-
-## Traefik Integration
-
-Configure Traefik to use this service for forward authentication:
-
-```yaml
-http:
-  middlewares:
-    rusty-valkey-auth:
-      forwardAuth:
-        address: "http://rusty-valkey-forward-auth:8080/forward-auth"
-```
 
 ## Endpoints
 
