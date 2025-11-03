@@ -2,6 +2,25 @@ apiVersion: v1
 entries:
   rusty-valkey-forward-auth:
   - apiVersion: v2
+    appVersion: 0.1.1
+    created: "2025-11-03T09:21:42.046981128Z"
+    dependencies:
+    - name: valkey
+      repository: https://valkey.io/valkey-helm/
+      version: 0.7.7
+    description: Helm chart for deploying the Rusty Valkey Forward Auth service.
+    digest: 0080b28787f72aece7055de97f4b1302d24d5c21c6991fde2294665b52caaa8f
+    keywords:
+    - valkey
+    - oauth2
+    - forward-auth
+    - rust
+    name: rusty-valkey-forward-auth
+    type: application
+    urls:
+    - https://github.com/SINTEF/rusty-valkey-forward-auth/releases/download/rusty-valkey-forward-auth-0.1.1/rusty-valkey-forward-auth-0.1.1.tgz
+    version: 0.1.1
+  - apiVersion: v2
     appVersion: 0.1.0
     created: "2025-11-03T07:00:59.017715167Z"
     dependencies:
@@ -20,4 +39,4 @@ entries:
     urls:
     - https://github.com/SINTEF/rusty-valkey-forward-auth/releases/download/rusty-valkey-forward-auth-0.1.0/rusty-valkey-forward-auth-0.1.0.tgz
     version: 0.1.0
-generated: "2025-11-03T07:00:59.017721209Z"
+generated: "2025-11-03T09:21:42.046988672Z"
