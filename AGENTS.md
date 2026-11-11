@@ -6,7 +6,7 @@ Quick-start notes for any agent touching this repo.
 
 - Rust service offering Traefik forward-auth plus API token CRUD.
 - Tokens live in Valkey as blake3 hashes; Lua keeps user/token sets in sync.
-- OAuth2 resource server (tower-oauth2-resource-server 0.8.0) secures the admin API and provides self-service user flows.
+- OAuth2 resource server (tower-oauth2-resource-server 0.11) secures the admin API and provides self-service user flows.
 
 ## Essential Commands
 
@@ -29,7 +29,8 @@ Quick-start notes for any agent touching this repo.
 - `oauth.claims.subject` selects the claim that becomes the user `sub`; `oauth.claims.groups` & `oauth.admin.group` control admin gating (case-sensitivity toggles available).
 - Admin token management lives at `/api/users/{sub}/tokens` and requires the configured admin group to pass validation.
 - Authenticated users may manage their own tokens via `/api/me/tokens` and `/api/me/tokens/{id}` (subject derived from the validated JWT).
-- Forward-auth remains standalone and does not participate in OAuth2 validation.
+- Forward-auth remains standalone and does not participate in OAuth2 validation. On success it returns 204 with `X-Authenticated-User` (token subject) and `X-Authenticated-Token-Id`.
+- `TOKEN_SALT` is mandatory (service refuses to start without it); an empty `oauth.audiences` only logs a warning.
 
 ## Testing Notes
 

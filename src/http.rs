@@ -6,7 +6,7 @@ use crate::{
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{Extension, Path, State};
-use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
@@ -142,12 +142,25 @@ fn build_router(
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
+        .layer(page_helmet_layer())
         .with_state(state);
 
     match cors_layer {
         Some(layer) => router.layer(layer),
         None => router,
     }
+}
+
+/// Security headers for everything served (SPA, `/docs`, health, forward-auth).
+/// The strict default CSP and cross-origin embedder policy are dropped here because
+/// they would break the Scalar docs page and the OIDC flows of the SPA; the JSON API
+/// routes keep the full defaults through their own layer.
+fn page_helmet_layer() -> HelmetLayer {
+    let mut layer = HelmetLayer::with_defaults();
+    layer
+        .remove(header::CONTENT_SECURITY_POLICY)
+        .remove(HeaderName::from_static("cross-origin-embedder-policy"));
+    layer
 }
 
 fn cors_layer_from_config(config: &CorsConfig) -> anyhow::Result<Option<CorsLayer>> {
@@ -499,6 +512,27 @@ async fn list_my_tokens(
 }
 
 const MAX_DESCRIPTION_LENGTH: usize = 256;
+const MAX_SUBJECT_LENGTH: usize = 256;
+
+/// The subject is echoed in the `X-Authenticated-User` header, so it must be a valid,
+/// reasonably short header value without control characters.
+fn validate_subject(subject: &str) -> Result<(), ApiError> {
+    if subject.is_empty() {
+        return Err(ApiError::bad_request("subject must not be empty"));
+    }
+    if subject.len() > MAX_SUBJECT_LENGTH {
+        return Err(ApiError::bad_request(format!(
+            "subject exceeds {} bytes",
+            MAX_SUBJECT_LENGTH
+        )));
+    }
+    if subject.chars().any(char::is_control) || HeaderValue::from_str(subject).is_err() {
+        return Err(ApiError::bad_request(
+            "subject contains unsupported characters",
+        ));
+    }
+    Ok(())
+}
 
 async fn create_token_for_subject(
     state: &AppState,
@@ -506,9 +540,9 @@ async fn create_token_for_subject(
     description: Option<String>,
 ) -> Result<CreateTokenResponse, ApiError> {
     let subject = subject.trim();
-    if subject.is_empty() {
-        warn!("attempted to create token with empty subject");
-        return Err(ApiError::bad_request("subject must not be empty"));
+    if let Err(err) = validate_subject(subject) {
+        warn!("rejected token creation for invalid subject");
+        return Err(err);
     }
 
     const TOKEN_LENGTH: usize = 32; // 256 bits
@@ -799,8 +833,16 @@ async fn delete_my_token(
     path = "/forward-auth",
     tag = "forward-auth",
     responses(
-        (status = 204, description = "Token accepted"),
-        (status = 401, body = ApiErrorBody)
+        (
+            status = 204,
+            description = "Token accepted",
+            headers(
+                ("X-Authenticated-User" = String, description = "Subject owning the token"),
+                ("X-Authenticated-Token-Id" = String, description = "Hashed identifier of the token")
+            )
+        ),
+        (status = 401, body = ApiErrorBody),
+        (status = 403, body = ApiErrorBody)
     )
 )]
 async fn forward_auth(
@@ -836,9 +878,18 @@ async fn forward_auth(
         "forward-auth accepted token"
     );
 
+    // Subjects stored before validation existed may not be valid header values.
+    let user_header = HeaderValue::from_str(&sub).map_err(|_| {
+        warn!(
+            token_id = token_hash.as_str(),
+            "forward-auth subject is not a valid header value"
+        );
+        ApiError::forbidden("subject cannot be forwarded")
+    })?;
+
     Response::builder()
         .status(StatusCode::NO_CONTENT)
-        .header("X-Authenticated-User", sub.as_str())
+        .header("X-Authenticated-User", user_header)
         .header("X-Authenticated-Token-Id", token_hash.as_str())
         .body(Body::empty())
         .map_err(|_| ApiError::internal("failed to build response"))
@@ -1507,8 +1558,25 @@ mod tests {
         let response = forward_auth(State(state), headers).await.expect("auth ok");
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.headers().get("X-Authenticated-User").unwrap(),
+            sub.as_str()
+        );
+        assert_eq!(
+            response.headers().get("X-Authenticated-Token-Id").unwrap(),
+            hash.as_str()
+        );
 
         cleanup_token(&client, &hash, &sub).await;
+    }
+
+    #[test]
+    fn validate_subject_rejects_unsafe_values() {
+        assert!(validate_subject("alice@example.org").is_ok());
+        assert!(validate_subject("").is_err());
+        assert!(validate_subject("bad\r\nX-Admin: 1").is_err());
+        assert!(validate_subject("tab\tsub").is_err());
+        assert!(validate_subject(&"a".repeat(MAX_SUBJECT_LENGTH + 1)).is_err());
     }
 
     #[tokio::test]

@@ -61,16 +61,18 @@ impl AuthState {
         tenant_builder = tenant_builder
             .jwks_refresh_interval(Duration::from_secs(config.jwks_refresh_interval_secs));
 
-        if !config.audiences.is_empty() {
-            let audiences = config
-                .audiences
-                .iter()
-                .map(|aud| aud.trim())
-                .filter(|aud| !aud.is_empty())
-                .collect::<Vec<_>>();
-            if !audiences.is_empty() {
-                tenant_builder = tenant_builder.audiences(&audiences);
-            }
+        let audiences = config
+            .audiences
+            .iter()
+            .map(|aud| aud.trim())
+            .filter(|aud| !aud.is_empty())
+            .collect::<Vec<_>>();
+        if audiences.is_empty() {
+            tracing::warn!(
+                "oauth.audiences is empty: any token from the issuer is accepted, including tokens minted for other clients. Configure oauth.audiences."
+            );
+        } else {
+            tenant_builder = tenant_builder.audiences(&audiences);
         }
 
         let tenant = tenant_builder

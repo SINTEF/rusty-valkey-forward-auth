@@ -3,7 +3,7 @@ FROM rust:1.94-slim AS backend-build
 WORKDIR /srv/app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev \
+    && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./

@@ -5,10 +5,6 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-/// Default token salt (echo rusty-valkey-forward-auth | sha256sum).
-pub(crate) const DEFAULT_TOKEN_SALT_HEX: &str =
-    "3794447850d23a5db972dbe556437ec2edfe4294687843d7f0587bd9535beecf";
-
 #[derive(Config)]
 pub(crate) struct RVFAConfig {
     /// Port to listen on.
@@ -69,17 +65,9 @@ impl RVFAConfig {
 
         config.frontend.materialize(&config.oauth)?;
 
-        if config.token_salt.trim().is_empty() {
-            config.token_salt = DEFAULT_TOKEN_SALT_HEX.to_string();
-        }
-
-        if config
-            .token_salt
-            .eq_ignore_ascii_case(DEFAULT_TOKEN_SALT_HEX)
-        {
-            tracing::warn!(
-                "TOKEN_SALT is using the built-in default; generate a unique salt for production."
-            );
+        config.token_salt = config.token_salt.trim().to_string();
+        if config.token_salt.is_empty() {
+            anyhow::bail!("TOKEN_SALT must be set (generate one with `openssl rand -hex 32`)");
         }
 
         Ok(config)

@@ -68,13 +68,16 @@ http:
     rusty-valkey-auth:
       forwardAuth:
         address: "http://rusty-valkey-forward-auth:8080/forward-auth"
+        authResponseHeaders:
+          - X-Authenticated-User
+          - X-Authenticated-Token-Id
 ```
 
 ## Development
 
 ### Prerequisites
 
-- Rust 1.90+
+- Rust 1.94+
 - Node.js 24+
 - Valkey on `localhost:6379`
 - An OAuth2/OIDC provider. Tested with Keycloak.

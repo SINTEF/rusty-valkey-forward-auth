@@ -1,12 +1,12 @@
 [package]
 name = "rusty-valkey-forward-auth"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2024"
 
 [dependencies]
 tokio = { version = "1.50", features = ["full"] }
 tower = { version = "0.5.3", features = ["full"] }
-tower-http = { version = "0.6.8", features = ["full"] }
+tower-http = { version = "0.6.8", features = ["cors", "fs", "timeout", "trace", "set-header"] }
 fred = { version = "10.1", features = ["i-scripts"] }
 confique = { version = "0.4", features = ["toml"] }
 anyhow = "1.0.102"
