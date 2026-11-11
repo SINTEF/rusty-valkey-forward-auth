@@ -9,7 +9,7 @@ use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{any, delete, get};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -79,14 +79,8 @@ fn build_router(
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/frontend/config", get(frontend_config))
-        .route(
-            "/forward-auth",
-            get(forward_auth)
-                .post(forward_auth)
-                .put(forward_auth)
-                .delete(forward_auth)
-                .options(forward_auth),
-        )
+        // Accept every method: proxies like Envoy forward the original one.
+        .route("/forward-auth", any(forward_auth))
         .merge(Scalar::with_url("/docs", openapi));
 
     let auth_state = state.auth.clone();
@@ -836,7 +830,7 @@ async fn delete_my_token(
 }
 
 #[utoipa::path(
-    method(get, head, post, put, delete, options),
+    method(get, head, post, put, patch, delete, options),
     path = "/forward-auth",
     tag = "forward-auth",
     responses(
@@ -1630,7 +1624,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn forward_auth_accepts_get_and_post_methods() {
+    async fn forward_auth_accepts_any_method() {
         use tower::ServiceExt;
 
         let client = setup_test_client().await;
@@ -1647,43 +1641,56 @@ mod tests {
             .expect("store token");
 
         let auth_value = format!("bearer {}", token);
+        let methods = [
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ];
 
-        let get_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/forward-auth")
-                    .header(header::AUTHORIZATION, &auth_value)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .expect("GET request failed");
+        for method in methods {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri("/forward-auth")
+                        .header(header::AUTHORIZATION, &auth_value)
+                        .body(Body::from("ignored body"))
+                        .unwrap(),
+                )
+                .await
+                .expect("request failed");
+            assert_eq!(
+                response.status(),
+                StatusCode::NO_CONTENT,
+                "{method} with a valid token should return 204"
+            );
+            assert_eq!(
+                response.headers().get("X-Authenticated-User").unwrap(),
+                sub.as_str()
+            );
 
-        assert_eq!(
-            get_response.status(),
-            StatusCode::NO_CONTENT,
-            "GET /forward-auth should return 204"
-        );
-
-        let post_response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/forward-auth")
-                    .header(header::AUTHORIZATION, &auth_value)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .expect("POST request failed");
-
-        assert_eq!(
-            post_response.status(),
-            StatusCode::NO_CONTENT,
-            "POST /forward-auth should return 204"
-        );
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri("/forward-auth")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("request failed");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} without a token should return 401"
+            );
+        }
 
         cleanup_token(&client, &hash, &sub).await;
     }

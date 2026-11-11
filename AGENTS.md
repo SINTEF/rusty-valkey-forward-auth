@@ -29,7 +29,7 @@ Quick-start notes for any agent touching this repo.
 - `oauth.claims.subject` selects the claim that becomes the user `sub`; `oauth.claims.groups` & `oauth.admin.group` control admin gating (case-sensitivity toggles available).
 - Admin token management lives at `/api/users/{sub}/tokens` and requires the configured admin group to pass validation.
 - Authenticated users may manage their own tokens via `/api/me/tokens` and `/api/me/tokens/{id}` (subject derived from the validated JWT).
-- Forward-auth remains standalone and does not participate in OAuth2 validation. On success it returns 204 with `X-Authenticated-User` (token subject) and `X-Authenticated-Token-Id`.
+- Forward-auth remains standalone, does not participate in OAuth2 validation, and accepts any HTTP method (Envoy forwards the original one). On success it returns 204 with `X-Authenticated-User` (token subject) and `X-Authenticated-Token-Id`.
 - `TOKEN_SALT` is mandatory (service refuses to start without it); an empty `oauth.audiences` only logs a warning.
 
 ## Testing Notes
