@@ -179,6 +179,8 @@ Secret references take precedence over literal values when both are provided.
     secretKeyRef:
       name: {{ include "rusty-valkey-forward-auth.secretName" $root }}
       key: token-salt
+  {{- else }}
+    {{- fail "config.tokenSalt or config.tokenSaltSecret must be set (generate one with: openssl rand -hex 32)" }}
   {{- end }}
 {{- end }}
 {{- $cors := $cfg.cors | default dict }}
@@ -208,6 +210,17 @@ Secret references take precedence over literal values when both are provided.
 {{- if $jwks }}
 - name: OAUTH_JWKS_URL
   value: {{ $jwks | quote }}
+{{- end }}
+{{- $audiences := list }}
+{{- range $aud := ($oauth.audiences | default (list)) }}
+  {{- $trimmedAud := tpl $aud $root | trim }}
+  {{- if $trimmedAud }}
+    {{- $audiences = append $audiences $trimmedAud }}
+  {{- end }}
+{{- end }}
+{{- if $audiences }}
+- name: OAUTH_AUDIENCES
+  value: {{ join "," $audiences | quote }}
 {{- end }}
 {{- $tenant := tpl (default "" $oauth.tenantId) $root | trim }}
 {{- if $tenant }}

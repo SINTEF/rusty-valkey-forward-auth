@@ -243,8 +243,12 @@ pub(crate) struct OAuthConfig {
     #[config(env = "OAUTH_TENANT_ID")]
     pub tenant_id: Option<String>,
 
-    /// Audiences that incoming tokens must contain.
-    #[config(default = [])]
+    /// Audiences that incoming tokens must contain (comma-separated in OAUTH_AUDIENCES).
+    #[config(
+        env = "OAUTH_AUDIENCES",
+        default = [],
+        parse_env = parse_comma_separated
+    )]
     pub audiences: Vec<String>,
 
     /// Interval (in seconds) for JWKS refresh when jwks_url is set.
@@ -290,12 +294,12 @@ pub(crate) struct CorsConfig {
     #[config(
         env = "CORS_ALLOW_ORIGINS",
         default = [],
-        parse_env = parse_cors_allow_origins
+        parse_env = parse_comma_separated
     )]
     pub allow_origins: Vec<String>,
 }
 
-fn parse_cors_allow_origins(raw: &str) -> Result<Vec<String>, Infallible> {
+fn parse_comma_separated(raw: &str) -> Result<Vec<String>, Infallible> {
     if raw.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -310,24 +314,24 @@ fn parse_cors_allow_origins(raw: &str) -> Result<Vec<String>, Infallible> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_cors_allow_origins;
+    use super::parse_comma_separated;
 
     #[test]
     fn parse_empty_string_returns_empty_vec() {
-        let parsed = parse_cors_allow_origins("").expect("parser should not fail");
+        let parsed = parse_comma_separated("").expect("parser should not fail");
         assert!(parsed.is_empty());
     }
 
     #[test]
     fn parse_single_origin_trims_whitespace() {
         let parsed =
-            parse_cors_allow_origins("  http://localhost:3000  ").expect("parser should not fail");
+            parse_comma_separated("  http://localhost:3000  ").expect("parser should not fail");
         assert_eq!(parsed, vec!["http://localhost:3000".to_string()]);
     }
 
     #[test]
     fn parse_multiple_origins_ignores_extra_commas() {
-        let parsed = parse_cors_allow_origins("http://one.test, http://two.test , ,")
+        let parsed = parse_comma_separated("http://one.test, http://two.test , ,")
             .expect("parser should not fail");
         assert_eq!(
             parsed,
@@ -338,7 +342,7 @@ mod tests {
     #[test]
     fn parse_allows_wildcard_origin() {
         let parsed =
-            parse_cors_allow_origins("*,http://example.test").expect("parser should not fail");
+            parse_comma_separated("*,http://example.test").expect("parser should not fail");
         assert_eq!(
             parsed,
             vec!["*".to_string(), "http://example.test".to_string()]
